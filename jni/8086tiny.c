@@ -388,16 +388,23 @@ void render_text_mode() {
     int cols = 80;
     int rows = 25;
     
+    LOGI2("render_text_mode: called, text_vram[0]=0x%02X, text_vram[1]=0x%02X", text_vram[0], text_vram[1]);
+    
     // Clear framebuffer to black
     for (int i = 0; i < text_fb_width * text_fb_height; i++) {
         text_framebuffer[i] = 0xFF000000;
     }
     
+    int chars_drawn = 0;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             int vram_offset = (row * cols + col) * 2;
             unsigned char ch = text_vram[vram_offset];
             unsigned char attr = text_vram[vram_offset + 1];
+            
+            if (ch != 0 || attr != 0) {
+                chars_drawn++;
+            }
             
             int fg_color = attr & 0x0F;
             int bg_color = (attr >> 4) & 0x07;
@@ -429,6 +436,7 @@ void render_text_mode() {
             }
         }
     }
+    LOGI2("render_text_mode: completed, chars_drawn=%d, first pixel=0x%08X", chars_drawn, text_framebuffer[0]);
     text_mode_active = 1;
 }
 

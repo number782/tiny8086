@@ -1,0 +1,86 @@
+# Dockerfile for Android 1.6 (API 4) build environment
+# Uses Ubuntu 12.04 (Precise) - last LTS to support NDK r5c
+# NDK r5c is the last NDK version to support Android 1.6 (API level 4)
+
+FROM ubuntu:12.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install basic build dependencies
+RUN sed -i 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y \
+    wget \
+    curl \
+    git \
+    build-essential \
+    lib32stdc++6 \
+    lib32z1 \
+    lib32ncurses5 \
+    lib32bz2-1.0 \
+    lib32gcc1 \
+    openjdk-6-jdk \
+    unzip \
+    zip \
+    ant \
+    expect \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Android SDK (legacy tools for API 4)
+ENV SDK_DIR=/opt/android-sdk/android-sdk-linux
+RUN mkdir -p ${SDK_DIR} && \
+    cd /tmp && \
+    wget -q http://dl.google.com/android/android-sdk_r24.4.1-linux.tgz && \
+    tar -xzf android-sdk_r24.4.1-linux.tgz -C ${SDK_DIR} --strip-components=1 && \
+    rm android-sdk_r24.4.1-linux.tgz
+
+ENV ANDROID_HOME=${SDK_DIR}
+ENV PATH=${SDK_DIR}/tools:${SDK_DIR}/platform-tools:${PATH}
+
+# Install SDK build tools (19.1) directly since SDK manager doesn't work reliably
+RUN cd /tmp && \
+    wget -q https://dl.google.com/android/repository/build-tools_r19.1-linux.zip -O build-tools.zip && \
+    unzip -q build-tools.zip -d ${SDK_DIR}/build-tools/ && \
+    rm build-tools.zip && \
+    mv ${SDK_DIR}/build-tools/android-4.4.2 ${SDK_DIR}/build-tools/19.1.0 && \
+    echo "Pkg.Revision=19.1.0" > ${SDK_DIR}/build-tools/19.1.0/source.properties
+
+# Install SDK platform for Android 4.4.2 (API 19) - android-4 (API 4) no longer available
+RUN echo y | ${SDK_DIR}/tools/android update sdk --no-ui --filter platform-tools,android-19,extra-android-support 2>&1 | tail -20
+
+# Download and install Android NDK r5c (last to support API 4)
+ENV NDK_VERSION=r5c
+ENV NDK_URL=https://dl.google.com/android/ndk/android-ndk-${NDK_VERSION}-linux-x86.tar.bz2
+
+RUN mkdir -p /opt/android && \
+    cd /opt/android && \
+    wget -q ${NDK_URL} && \
+    tar -xjf android-ndk-${NDK_VERSION}-linux-x86.tar.bz2 && \
+    rm android-ndk-${NDK_VERSION}-linux-x86.tar.bz2
+
+ENV NDK_ROOT=/opt/android/android-ndk-${NDK_VERSION}
+ENV PATH=${NDK_ROOT}:${PATH}
+
+# Create standalone toolchain for Android 1.6 (API 4) ARM
+RUN ${NDK_ROOT}/build/tools/make-standalone-toolchain.sh \
+    --platform=android-4 \
+    --toolchain=arm-linux-androideabi-4.4.3 \
+    --install-dir=/opt/android-toolchain
+
+ENV ANDROID_TOOLCHAIN=/opt/android-toolchain
+ENV PATH=${ANDROID_TOOLCHAIN}/bin:${PATH}
+ENV CC=arm-linux-androideabi-gcc
+ENV CXX=arm-linux-androideabi-g++
+ENV AR=arm-linux-androideabi-ar
+ENV STRIP=arm-linux-androideabi-strip
+ENV SYSROOT=${ANDROID_TOOLCHAIN}/sysroot
+
+# Set up work directory
+WORKDIR /src
+
+# Copy all source files (including sdl-android submodule)
+COPY . /src/
+
+# Default command - build with ndk-build
+CMD ["/opt/android/android-ndk-r5c/ndk-build", "-C", "/src/jni"]

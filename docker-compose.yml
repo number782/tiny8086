@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  android16-build:
+    build:
+      context: .
+      dockerfile: Dockerfile.android16
+    volumes:
+      - .:/src
+    working_dir: /src
+    # Build the native library
+    command: /opt/android/android-ndk-r5c/ndk-build -C /src/jni
+
+  android16-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.android16-test
+    volumes:
+      - .:/src
+    working_dir: /src
+    ports:
+      - "5900:5900"  # VNC for emulator display
+      - "5555:5555"  # ADB
+    privileged: true  # Needed for KVM/QEMU
+    devices:
+      - /dev/kvm:/dev/kvm  # Hardware acceleration (if available)
+    # Default: start emulator with VNC
+    # Override command to run tests:
+    #   docker-compose run android16-test bash -c "adb install -r 8086tiny-debug.apk && adb shell am start -n com.eight086tiny/.MainActivity"

@@ -1,0 +1,22 @@
+--- Settings.java
++++ Settings.java
+@@ -667,6 +667,8 @@ public class Settings
+ 
+ 	static void setEnvVars(MainActivity p)
+ 	{
++		nativeSetEnv( "AUDIO_NATIVE_SAMPLE_RATE", String.valueOf(android.media.AudioTrack.getNativeOutputSampleRate(android.media.AudioManager.STREAM_MUSIC)) );
++		nativeSetEnv( "OS_VERSION", System.getProperty("os.version", "4.0.0") );
+ 		String lang = new String(Locale.getDefault().getLanguage());
+ 		if( Locale.getDefault().getCountry().length() > 0 )
+ 			lang = lang + "_" + Locale.getDefault().getCountry();
+--- Globals.java
++++ Globals.java
+@@ -90,7 +90,7 @@ class Globals
+ 	// Phone-specific config, modified by user in "Change phone config" startup dialog
+ 	public static int VideoDepthBpp = 16;
+ 	public static boolean HorizontalOrientation = true;
+-	public static boolean AutoDetectOrientation = false;
++	public static boolean AutoDetectOrientation = true;
+ 	public static boolean ImmersiveMode = true;
+ 	public static boolean DrawInDisplayCutout = false;
+ 	public static boolean HideSystemMousePointer = false;

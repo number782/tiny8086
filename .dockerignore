@@ -1,0 +1,10 @@
+bin/
+gen/
+obj/
+libs/
+*.apk
+*.so
+*.o
+*.a
+8086tiny
+8086tiny_slowcpu

@@ -1,0 +1,18 @@
+# Progress Log - 8086tiny Android Emulator
+
+## Current Task: Restructure emulator for Android frame-based execution
+- Move initialization from main() to nativeInit8086()
+- Move instruction execution to nativeStepFrame8086()
+- Build APK
+- Test on device
+
+## Last Completed: 
+- Built APK with reset functionality
+- App installed and running but BIOS halts after ~90ms
+- Architecture needs restructuring: init in nativeInit8086, execution in nativeStepFrame8086
+
+## Next Step:
+Refactor jni/8086tiny.c to split main() into init + step functions
+
+## In Progress:
+Refactoring jni/8086tiny.c - creating emulator_init() and emulator_step() functions

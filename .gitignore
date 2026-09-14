@@ -1,1 +1,16 @@
 lazypush.sh
+# Linux System Files
+.DS_Store
+.directory
+.Trash/
+
+# Text Editors & IDEs
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Build & Temporary Files
+*.log
+*.tmp

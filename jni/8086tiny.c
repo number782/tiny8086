@@ -388,7 +388,13 @@ void render_text_mode() {
     int cols = 80;
     int rows = 25;
     
-    LOGI2("render_text_mode: called, text_vram[0]=0x%02X, text_vram[1]=0x%02X", text_vram[0], text_vram[1]);
+    static int render_call_count = 0;
+    render_call_count++;
+    
+    if (render_call_count % 100 == 1) {
+        LOGI2("render_text_mode: call #%d, text_vram[0]=0x%02X, text_vram[1]=0x%02X, text_vram[2]=0x%02X, text_vram[3]=0x%02X", 
+              render_call_count, text_vram[0], text_vram[1], text_vram[2], text_vram[3]);
+    }
     
     // Clear framebuffer to black
     for (int i = 0; i < text_fb_width * text_fb_height; i++) {
@@ -436,7 +442,9 @@ void render_text_mode() {
             }
         }
     }
-    LOGI2("render_text_mode: completed, chars_drawn=%d, first pixel=0x%08X", chars_drawn, text_framebuffer[0]);
+    if (render_call_count % 100 == 1) {
+        LOGI2("render_text_mode: completed, chars_drawn=%d, first pixel=0x%08X", chars_drawn, text_framebuffer[0]);
+    }
     text_mode_active = 1;
 }
 
@@ -494,6 +502,9 @@ void emulator_step(int max_instructions) {
     LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
     int instructions_executed = 0;
     
+    static int step_call_count = 0;
+    step_call_count++;
+    
     for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
     {
         // Handle reset request
@@ -516,6 +527,11 @@ void emulator_step(int max_instructions) {
             trap_flag = 0;
             LOGI2("emulator_step: reset complete");
             continue;
+        }
+        
+        if (step_call_count % 10 == 1 && instructions_executed == 0) {
+            LOGI2("emulator_step: call #%d, CS:IP=%04X:%04X, inst_counter=%d", 
+                  step_call_count, regs16[REG_CS], reg_ip, inst_counter);
         }
         
         set_opcode(*opcode_stream);

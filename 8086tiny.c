@@ -486,7 +486,7 @@ void emulator_step(int max_instructions) {
     LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
     int instructions_executed = 0;
     
-    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
+    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem + RAM_SIZE && instructions_executed < max_instructions;)
     {
         // Handle reset request
         if (reset_requested) {

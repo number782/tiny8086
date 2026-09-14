@@ -486,14 +486,14 @@ void emulator_init(int argc, char **argv) {
     LOGI2("emulator_init: reading BIOS into memory");
     read(disk[2], regs8 + (reg_ip = 0x100), 0xFF00);
     LOGI2("emulator_init: BIOS loaded");
-    
+
     // Load instruction decoding helper table
     LOGI2("emulator_init: loading bios_table_lookup");
     for (int i = 0; i < 20; i++)
         for (int j = 0; j < 256; j++)
             bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
     LOGI2("emulator_init: bios_table_lookup loaded");
-    
+
     LOGI2("emulator_init: init complete");
 }
 
@@ -505,16 +505,24 @@ void emulator_step(int max_instructions) {
     static int step_call_count = 0;
     step_call_count++;
     
-    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
+    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem + RAM_SIZE && instructions_executed < max_instructions;)
     {
         // Handle reset request
         if (reset_requested) {
             reset_requested = 0;
+            // Save DL (boot device) and TF
+            unsigned char saved_dl = regs8[REG_DL];
+            unsigned char saved_tf = regs8[FLAG_TF];
+            
             regs16 = (unsigned short *)(regs8 = mem + REGS_BASE);
             regs16[REG_CS] = 0xF000;
-            regs8[FLAG_TF] = 0;
+            regs8[FLAG_TF] = saved_tf;
             reg_ip = 0x100;
             read(disk[2], regs8 + reg_ip, 0xFF00);
+            
+            // Restore DL (boot device)
+            regs8[REG_DL] = saved_dl;
+            
             for (int i = 0; i < 20; i++)
                 for (int j = 0; j < 256; j++)
                     bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
@@ -525,11 +533,17 @@ void emulator_step(int max_instructions) {
             seg_override_en = 0;
             rep_override_en = 0;
             trap_flag = 0;
-            LOGI2("emulator_step: reset complete");
+            LOGI2("emulator_step: reset complete, starting at CS=%04X IP=%04X, XLAT_OPCODE[EA]=%d", regs16[REG_CS], reg_ip, bios_table_lookup[8][0xEA]);
             continue;
         }
         
-        if (step_call_count % 10 == 1 && instructions_executed == 0) {
+        // Log first few instruction executions to see what's happening
+        if (step_call_count == 1 && instructions_executed < 10) {
+            LOGI2("emulator_step: call #%d, inst#%d, CS:IP=%04X:%04X, opcode=%02X, phys_addr=%05X", 
+                  step_call_count, instructions_executed, regs16[REG_CS], reg_ip, *opcode_stream, 16 * regs16[REG_CS] + reg_ip);
+        }
+        
+        if (step_call_count % 500 == 1 && instructions_executed == 0) {
             LOGI2("emulator_step: call #%d, CS:IP=%04X:%04X, inst_counter=%d", 
                   step_call_count, regs16[REG_CS], reg_ip, inst_counter);
         }
@@ -560,6 +574,12 @@ void emulator_step(int max_instructions) {
                 i_data1 = (char)i_data1;
             
             DECODE_RM_REG;
+        }
+        
+        // Log JMP FAR (opcode EA) execution
+        if (raw_opcode_id == 0xEA) {
+            LOGI2("DECODE: raw_opcode=EA, xlat_opcode_id=%d, i_reg4bit=%d, i_w=%d, i_d=%d, i_data0=%04X, i_data2=%04X, CS:IP=%04X:%04X", 
+                  xlat_opcode_id, i_reg4bit, i_w, i_d, i_data0, i_data2, regs16[REG_CS], reg_ip);
         }
         
         switch (xlat_opcode_id)
@@ -701,9 +721,16 @@ void emulator_step(int max_instructions) {
             OPCODE 14: // JMP | CALL short/near
                 reg_ip += 3 - i_d;
                 if (!i_w) {
-                    if (i_d) // JMP far
-                        reg_ip = 0, regs16[REG_CS] = i_data2;
-                    else // CALL
+                    if (i_d) { // JMP far
+                        // JMP FAR is 5 bytes: EA offset_low offset_high segment_low segment_high
+                        // Read full 16-bit segment from opcode_stream[3] | (opcode_stream[4] << 8)
+                        unsigned short target_segment = (unsigned short)opcode_stream[3] | ((unsigned short)opcode_stream[4] << 8);
+                        LOGI2("JMP FAR: raw_opcode=%02X, i_data0=%04X, target_seg=%04X, old_CS=%04X, old_IP=%04X",
+                              raw_opcode_id, i_data0, target_segment, regs16[REG_CS], reg_ip);
+                        reg_ip = i_data0;
+                        regs16[REG_CS] = target_segment;
+                        LOGI2("JMP FAR: new_CS=%04X, new_IP=%04X", regs16[REG_CS], reg_ip);
+                    } else // CALL
                         R_M_PUSH(reg_ip);
                 }
                 reg_ip += i_d && i_w ? (char)i_data0 : i_data0;
@@ -963,7 +990,9 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
             argv[argc++] = token;
             token = strtok(NULL, " ");
         }
-        free(cmd_copy);
+        // Don't free cmd_copy yet - argv[] pointers reference its buffer
+        // and emulator_init() uses them. Memory leak is acceptable for
+        // a long-running emulator process.
     }
     
     LOGI2("Calling emulator_init with argc=%d", argc);
@@ -971,15 +1000,19 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
         LOGI2("argv[%d] = '%s'", i, argv[i]);
     }
     
-    emulator_init(argc, argv);
-    
+emulator_init(argc, argv);
+
+    LOGI2("nativeInit8086: after emulator_init, reg_ip=0x%04X, regs16[CS]=0x%04X", reg_ip, regs16[REG_CS]);
+
     if (curdir) (*env)->ReleaseStringUTFChars(env, jcurdir, curdir);
     if (cmdline) (*env)->ReleaseStringUTFChars(env, jcmdline, cmdline);
 }
 
 JNIEXPORT void JNICALL
 Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz) {
+    LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X", reg_ip, regs16[REG_CS]);
     emulator_step(10000);
+    LOGI2("nativeStepFrame8086: after step, reg_ip=0x%04X, regs16[CS]=0x%04X, inst_counter=%d", reg_ip, regs16[REG_CS], inst_counter);
     render_text_mode();
 }
 
@@ -1050,7 +1083,7 @@ int main(int argc, char **argv)
     
     // Desktop builds: run in a continuous loop
     while (1) {
-        emulator_step(10000);
+emulator_step(10000);
     }
     
     return 0;

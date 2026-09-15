@@ -240,7 +240,7 @@ char pc_interrupt(unsigned char interrupt_num)
     // Special case: INT 3 (breakpoint) - this BIOS has a broken INT 3 handler that loops.
     // Just IRET to avoid infinite loop. Advance IP past the 1-byte INT 3 instruction (0xCC).
     if (interrupt_num == 3) {
-        LOGI2("INT 03: executing IRET (bypassing broken handler at IVT[3]), advancing IP");
+        LOGI2("INT 03: executing IRET (bypassing broken handler at IVT[3]), advancing IP from %04X", reg_ip);
         reg_ip += 1;
         return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
     }
@@ -254,8 +254,8 @@ char pc_interrupt(unsigned char interrupt_num)
     
     // Debug: log INT 10h (video), INT 13h (disk), and INT 19h (bootstrap) calls
     if (interrupt_num == 0x10 || interrupt_num == 0x13 || interrupt_num == 0x19) {
-        LOGI2("INT %02X: AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X ES=%04X",
-              interrupt_num, regs8[REG_AH], regs8[REG_AL], regs16[REG_BX], regs16[REG_CX], regs16[REG_DX], regs16[REG_ES]);
+        LOGI2("INT %02X: AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X ES=%04X, IP=%04X",
+              interrupt_num, regs8[REG_AH], regs8[REG_AL], regs16[REG_BX], regs16[REG_CX], regs16[REG_DX], regs16[REG_ES], reg_ip);
     }
     
     // Debug: log IVT for INT 10h, INT 13h and INT 19h on first call
@@ -420,8 +420,14 @@ static const unsigned char font8x8_basic[96][8] = {
 
 // Render text mode video RAM (B800:0) to text_framebuffer
 void render_text_mode() {
+    static int render_count = 0;
+    render_count++;
     unsigned short crtc_start_addr = (mem[0x4AE] << 8) | mem[0x4AD];
     unsigned char *text_vram = mem + 0xB8000 + (crtc_start_addr * 2);
+    if (render_count <= 5 || render_count % 100 == 1) {
+        LOGI2("render_text_mode #%d: crtc_start_addr=%04X, text_vram[0]=%02X%02X, mem[0x4AD]=%02X mem[0x4AE]=%02X",
+              render_count, crtc_start_addr, text_vram[0], text_vram[1], mem[0x4AD], mem[0x4AE]);
+    }
     int char_width = 8;
     int char_height = 8;
     int cols = 80;

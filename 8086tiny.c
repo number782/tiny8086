@@ -19,6 +19,15 @@
 #include "SDL.h"
 #endif
 
+// Logging - must be defined early for use in pc_interrupt and emulator_step
+#ifdef ANDROID
+#include <android/log.h>
+#include <jni.h>
+#define LOGI2(...) do { __android_log_print(ANDROID_LOG_INFO, "8086tiny", __VA_ARGS__); } while(0)
+#else
+#define LOGI2(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
+
 // Emulator system constants
 #define IO_PORT_COUNT 0x10000
 #define RAM_SIZE 0x10FFF0
@@ -228,16 +237,21 @@ void set_opcode(unsigned char opcode)
 // Execute INT #interrupt_num on the emulated machine
 char pc_interrupt(unsigned char interrupt_num)
 {
-	set_opcode(0xCD); // Decode like INT
+    unsigned short ivt_ip = (unsigned short)mem[4 * interrupt_num];
+    unsigned short ivt_cs = (unsigned short)mem[4 * interrupt_num + 2];
+    set_opcode(0xCD); // Decode like INT
 
-	make_flags();
-	R_M_PUSH(scratch_uint);
-	R_M_PUSH(regs16[REG_CS]);
-	R_M_PUSH(reg_ip);
-	MEM_OP(REGS_BASE + 2 * REG_CS, =, 4 * interrupt_num + 2);
-	R_M_OP(reg_ip, =, mem[4 * interrupt_num]);
+    make_flags();
+    R_M_PUSH(scratch_uint);
+    R_M_PUSH(regs16[REG_CS]);
+    R_M_PUSH(reg_ip);
+    MEM_OP(REGS_BASE + 2 * REG_CS, =, 4 * interrupt_num + 2);
+    R_M_OP(reg_ip, =, mem[4 * interrupt_num]);
+    LOGI2("INT %02X: IVT[%02X] IP=%04X CS=%04X -> CS:IP=%04X:%04X", interrupt_num, interrupt_num, ivt_ip, ivt_cs, regs16[REG_CS], reg_ip);
+    if (regs16[REG_CS] == 0)
+        LOGI2("WARNING: INT %02X set CS=0! IVT raw bytes: [0x%02X,0x%02X,0x%02X,0x%02X]", interrupt_num, mem[4*interrupt_num], mem[4*interrupt_num+1], mem[4*interrupt_num+2], mem[4*interrupt_num+3]);
 
-	return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
+    return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
 }
 
 // AAA and AAS instructions - which_operation is +1 for AAA, and -1 for AAS
@@ -254,14 +268,6 @@ void audio_callback(void *data, unsigned char *stream, int len)
 
 	spkr_en = io_ports[0x61] & 3;
 }
-#endif
-
-#ifdef ANDROID
-#include <android/log.h>
-#include <jni.h>
-#define LOGI2(...) do { __android_log_print(ANDROID_LOG_INFO, "8086tiny", __VA_ARGS__); } while(0)
-#else
-#define LOGI2(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif
 
 // Text mode framebuffer: 80 cols x 25 rows x 8x8 font = 640x200
@@ -486,7 +492,7 @@ void emulator_step(int max_instructions) {
     LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
     int instructions_executed = 0;
     
-    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem + RAM_SIZE && instructions_executed < max_instructions;)
+    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
     {
         // Handle reset request
         if (reset_requested) {
@@ -495,6 +501,7 @@ void emulator_step(int max_instructions) {
             regs16[REG_CS] = 0xF000;
             regs8[FLAG_TF] = 0;
             reg_ip = 0x100;
+            lseek(disk[2], 0, SEEK_SET);
             read(disk[2], regs8 + reg_ip, 0xFF00);
             for (int i = 0; i < 20; i++)
                 for (int j = 0; j < 256; j++)
@@ -511,6 +518,13 @@ void emulator_step(int max_instructions) {
         }
         
         set_opcode(*opcode_stream);
+        
+        if (inst_counter < 200) {
+            LOGI2("INST #%d: CS:IP=%04X:%04X, raw=0x%02X, xlat=%d, i_w=%d, i_d=%d", inst_counter, regs16[REG_CS], reg_ip, raw_opcode_id, xlat_opcode_id, i_w, i_d);
+        }
+        if (regs16[REG_CS] == 0 || reg_ip == 0) {
+            LOGI2("WARNING: CS=%04X IP=%04X at inst #%d (raw=0x%02X, xlat=%d)", regs16[REG_CS], reg_ip, inst_counter, raw_opcode_id, xlat_opcode_id);
+        }
         
         i_w = (i_reg4bit = raw_opcode_id & 7) & 1;
         i_d = i_reg4bit / 2 & 1;
@@ -578,8 +592,10 @@ void emulator_step(int max_instructions) {
                     OPCODE 5: // IMUL
                         i_w ? MUL_MACRO(short, regs16) : MUL_MACRO(char, regs8);
                     OPCODE 6: // DIV
+                        LOGI2("DIV: i_w=%d rm_addr=0x%X mem[rm_addr]=0x%02X DX=%04X AX=%04X", i_w, rm_addr, mem[rm_addr], regs16[REG_DX], regs16[REG_AX]);
                         i_w ? DIV_MACRO(unsigned short, unsigned, regs16) : DIV_MACRO(unsigned char, unsigned short, regs8);
                     OPCODE 7: // IDIV
+                        LOGI2("IDIV: i_w=%d rm_addr=0x%X mem[rm_addr]=0x%02X DX=%04X AX=%04X", i_w, rm_addr, mem[rm_addr], regs16[REG_DX], regs16[REG_AX]);
                         i_w ? DIV_MACRO(short, int, regs16) : DIV_MACRO(char, short, regs8);
                 }
             OPCODE 7: // ADD|OR|ADC|SBB|AND|SUB|XOR|CMP AL/AX, immed
@@ -677,8 +693,10 @@ void emulator_step(int max_instructions) {
             OPCODE 14: // JMP | CALL short/near
                 reg_ip += 3 - i_d;
                 if (!i_w) {
-                    if (i_d) // JMP far
+                    if (i_d) { // JMP far
+                        LOGI2("JMP FAR: i_data0=%04X i_data2=%04X -> CS=%04X IP=0000", i_data0, i_data2, i_data2);
                         reg_ip = 0, regs16[REG_CS] = i_data2;
+                    }
                     else // CALL
                         R_M_PUSH(reg_ip);
                 }
@@ -939,7 +957,6 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
             argv[argc++] = token;
             token = strtok(NULL, " ");
         }
-        free(cmd_copy);
     }
     
     LOGI2("Calling emulator_init with argc=%d", argc);

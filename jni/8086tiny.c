@@ -19,6 +19,15 @@
 #include "SDL.h"
 #endif
 
+// Logging - must be defined early for use in pc_interrupt and emulator_step
+#ifdef ANDROID
+#include <android/log.h>
+#include <jni.h>
+#define LOGI2(...) do { __android_log_print(ANDROID_LOG_INFO, "8086tiny", __VA_ARGS__); } while(0)
+#else
+#define LOGI2(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
+
 // Emulator system constants
 #define IO_PORT_COUNT 0x10000
 #define RAM_SIZE 0x10FFF0
@@ -228,16 +237,21 @@ void set_opcode(unsigned char opcode)
 // Execute INT #interrupt_num on the emulated machine
 char pc_interrupt(unsigned char interrupt_num)
 {
-	set_opcode(0xCD); // Decode like INT
+    unsigned short ivt_ip = (unsigned short)mem[4 * interrupt_num];
+    unsigned short ivt_cs = (unsigned short)mem[4 * interrupt_num + 2];
+    set_opcode(0xCD); // Decode like INT
 
-	make_flags();
-	R_M_PUSH(scratch_uint);
-	R_M_PUSH(regs16[REG_CS]);
-	R_M_PUSH(reg_ip);
-	MEM_OP(REGS_BASE + 2 * REG_CS, =, 4 * interrupt_num + 2);
-	R_M_OP(reg_ip, =, mem[4 * interrupt_num]);
+    make_flags();
+    R_M_PUSH(scratch_uint);
+    R_M_PUSH(regs16[REG_CS]);
+    R_M_PUSH(reg_ip);
+    MEM_OP(REGS_BASE + 2 * REG_CS, =, 4 * interrupt_num + 2);
+    R_M_OP(reg_ip, =, mem[4 * interrupt_num]);
+    LOGI2("INT %02X: IVT[%02X] IP=%04X CS=%04X -> CS:IP=%04X:%04X", interrupt_num, interrupt_num, ivt_ip, ivt_cs, regs16[REG_CS], reg_ip);
+    if (regs16[REG_CS] == 0)
+        LOGI2("WARNING: INT %02X set CS=0! IVT raw bytes: [0x%02X,0x%02X,0x%02X,0x%02X]", interrupt_num, mem[4*interrupt_num], mem[4*interrupt_num+1], mem[4*interrupt_num+2], mem[4*interrupt_num+3]);
 
-	return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
+    return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
 }
 
 // AAA and AAS instructions - which_operation is +1 for AAA, and -1 for AAS
@@ -256,14 +270,6 @@ void audio_callback(void *data, unsigned char *stream, int len)
 }
 #endif
 
-#ifdef ANDROID
-#include <android/log.h>
-#include <jni.h>
-#define LOGI2(...) do { __android_log_print(ANDROID_LOG_INFO, "8086tiny", __VA_ARGS__); } while(0)
-#else
-#define LOGI2(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
-#endif
-
 // Text mode framebuffer: 80 cols x 25 rows x 8x8 font = 640x200
 // Each pixel is 32-bit ARGB
 unsigned int text_framebuffer[640 * 200];
@@ -275,8 +281,10 @@ int text_mode_active = 0;
 jobject g_emulator_view = NULL;
 JNIEnv *g_jni_env = NULL;
 int reset_requested = 0;
+int emulator_initialized = 0;
 #else
 int reset_requested = 0;
+int emulator_initialized = 0;
 #endif
 
 // Corrected 8x8 font for text mode (ASCII 32-127, 96 chars)
@@ -388,29 +396,16 @@ void render_text_mode() {
     int cols = 80;
     int rows = 25;
     
-    static int render_call_count = 0;
-    render_call_count++;
-    
-    if (render_call_count % 100 == 1) {
-        LOGI2("render_text_mode: call #%d, text_vram[0]=0x%02X, text_vram[1]=0x%02X, text_vram[2]=0x%02X, text_vram[3]=0x%02X", 
-              render_call_count, text_vram[0], text_vram[1], text_vram[2], text_vram[3]);
-    }
-    
     // Clear framebuffer to black
     for (int i = 0; i < text_fb_width * text_fb_height; i++) {
         text_framebuffer[i] = 0xFF000000;
     }
     
-    int chars_drawn = 0;
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             int vram_offset = (row * cols + col) * 2;
             unsigned char ch = text_vram[vram_offset];
             unsigned char attr = text_vram[vram_offset + 1];
-            
-            if (ch != 0 || attr != 0) {
-                chars_drawn++;
-            }
             
             int fg_color = attr & 0x0F;
             int bg_color = (attr >> 4) & 0x07;
@@ -441,9 +436,6 @@ void render_text_mode() {
                 }
             }
         }
-    }
-    if (render_call_count % 100 == 1) {
-        LOGI2("render_text_mode: completed, chars_drawn=%d, first pixel=0x%08X", chars_drawn, text_framebuffer[0]);
     }
     text_mode_active = 1;
 }
@@ -482,19 +474,46 @@ void emulator_init(int argc, char **argv) {
     // Set CX:AX equal to the hard disk image size, if present
     CAST(unsigned)regs16[REG_AX] = *disk ? lseek(*disk, 0, 2) >> 9 : 0;
     
-    // Load BIOS image into F000:0100, and set IP to 0100
+    // Load BIOS image into F000:0000 (first 256 bytes) and F000:0100 (rest), and set IP to 0100
     LOGI2("emulator_init: reading BIOS into memory");
-    read(disk[2], regs8 + (reg_ip = 0x100), 0xFF00);
+    // First 256 bytes (IVT template + register area) -> F000:0000
+    read(disk[2], regs8, 0x100);
+    // Rest 64KB-256 -> F000:0100
+    read(disk[2], regs8 + 0x100, 0xFF00);
     LOGI2("emulator_init: BIOS loaded");
-
-    // Load instruction decoding helper table
-    LOGI2("emulator_init: loading bios_table_lookup");
-    for (int i = 0; i < 20; i++)
+    
+    // Copy IVT template from F000:0000 to 0000:0000 (first 1KB = 256 vectors * 4 bytes)
+    for (int i = 0; i < 0x400; i++) {
+        mem[i] = regs8[i];
+    }
+    LOGI2("emulator_init: IVT copied to 0000:0000");
+    
+    // Install reset vector at F000:FFF0 (JMP FAR F000:0100)
+    regs8[0xFFF0] = 0xEA;  // JMP FAR opcode
+    regs8[0xFFF1] = 0x00;  // offset low
+    regs8[0xFFF2] = 0x01;  // offset high = 0x0100
+    regs8[0xFFF3] = 0x00;  // segment low
+    regs8[0xFFF4] = 0xF0;  // segment high = 0xF000
+    LOGI2("emulator_init: reset vector installed at F000:FFF0");
+    
+    // Registers are now at F000:0000 (overwritten by BIOS load). 
+    // Table pointers at 0x81*2=0x102 offset in register area point into BIOS.
+    LOGI2("emulator_init: loading bios_table_lookup from BIOS tables");
+    for (int i = 0; i < 20; i++) {
+        unsigned short table_ptr = regs16[0x81 + i];
+        LOGI2("  Table %d ptr = %04X", i, table_ptr);
         for (int j = 0; j < 256; j++)
-            bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
+            bios_table_lookup[i][j] = regs8[table_ptr + j];
+    }
     LOGI2("emulator_init: bios_table_lookup loaded");
-
-    LOGI2("emulator_init: init complete");
+    LOGI2("  TABLE_BASE_INST_SIZE[00]=%d, TABLE_I_MOD_SIZE[00]=%d, TABLE_I_W_SIZE[00]=%d",
+          bios_table_lookup[12][0], bios_table_lookup[14][0], bios_table_lookup[13][0]);
+    LOGI2("  TABLE_BASE_INST_SIZE[01]=%d, TABLE_I_MOD_SIZE[01]=%d",
+          bios_table_lookup[12][1], bios_table_lookup[14][1]);
+    
+    // Now set up registers AFTER loading tables
+    regs16[REG_CS] = 0xF000;
+    reg_ip = 0x100;
 }
 
 // Emulator step function (formerly main() loop)
@@ -502,27 +521,31 @@ void emulator_step(int max_instructions) {
     LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
     int instructions_executed = 0;
     
-    static int step_call_count = 0;
-    step_call_count++;
-    
-    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem + RAM_SIZE && instructions_executed < max_instructions;)
+    for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
     {
         // Handle reset request
         if (reset_requested) {
             reset_requested = 0;
-            // Save DL (boot device) and TF
-            unsigned char saved_dl = regs8[REG_DL];
-            unsigned char saved_tf = regs8[FLAG_TF];
-            
             regs16 = (unsigned short *)(regs8 = mem + REGS_BASE);
             regs16[REG_CS] = 0xF000;
-            regs8[FLAG_TF] = saved_tf;
+            regs8[FLAG_TF] = 0;
             reg_ip = 0x100;
-            read(disk[2], regs8 + reg_ip, 0xFF00);
-            
-            // Restore DL (boot device)
-            regs8[REG_DL] = saved_dl;
-            
+            lseek(disk[2], 0, SEEK_SET);
+            // First 256 bytes (IVT template) -> F000:0000
+            read(disk[2], regs8, 0x100);
+            // Rest 64KB-256 -> F000:0100
+            read(disk[2], regs8 + 0x100, 0xFF00);
+            // Copy IVT template from F000:0000 to 0000:0000
+            for (int i = 0; i < 0x400; i++) {
+                mem[i] = regs8[i];
+            }
+            // Install reset vector at F000:FFF0 (JMP FAR F000:0100)
+            regs8[0xFFF0] = 0xEA;  // JMP FAR opcode
+            regs8[0xFFF1] = 0x00;
+            regs8[0xFFF2] = 0x01;
+            regs8[0xFFF3] = 0x00;
+            regs8[0xFFF4] = 0xF0;
+            // Load tables from BIOS (registers overwritten by BIOS load)
             for (int i = 0; i < 20; i++)
                 for (int j = 0; j < 256; j++)
                     bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
@@ -533,22 +556,26 @@ void emulator_step(int max_instructions) {
             seg_override_en = 0;
             rep_override_en = 0;
             trap_flag = 0;
-            LOGI2("emulator_step: reset complete, starting at CS=%04X IP=%04X, XLAT_OPCODE[EA]=%d", regs16[REG_CS], reg_ip, bios_table_lookup[8][0xEA]);
+            LOGI2("emulator_step: reset complete");
             continue;
         }
         
-        // Log first few instruction executions to see what's happening
-        if (step_call_count == 1 && instructions_executed < 10) {
-            LOGI2("emulator_step: call #%d, inst#%d, CS:IP=%04X:%04X, opcode=%02X, phys_addr=%05X", 
-                  step_call_count, instructions_executed, regs16[REG_CS], reg_ip, *opcode_stream, 16 * regs16[REG_CS] + reg_ip);
-        }
-        
-        if (step_call_count % 500 == 1 && instructions_executed == 0) {
-            LOGI2("emulator_step: call #%d, CS:IP=%04X:%04X, inst_counter=%d", 
-                  step_call_count, regs16[REG_CS], reg_ip, inst_counter);
-        }
-        
         set_opcode(*opcode_stream);
+        
+        // Debug: log instruction at stuck address
+        if (regs16[REG_CS] == 0x17B8 && reg_ip == 0x1798) {
+            unsigned int phys = 16 * regs16[REG_CS] + reg_ip;
+            LOGI2("STUCK: CS=%04X IP=%04X phys=%05X raw=%02X xlat=%d opcode_stream[0]=%02X opcode_stream[1]=%02X opcode_stream[2]=%02X",
+                  regs16[REG_CS], reg_ip, phys, raw_opcode_id, xlat_opcode_id,
+                  opcode_stream[0], opcode_stream[1], opcode_stream[2]);
+        }
+        
+        if (inst_counter < 200) {
+            LOGI2("INST #%d: CS:IP=%04X:%04X, raw=0x%02X, xlat=%d, i_w=%d, i_d=%d", inst_counter, regs16[REG_CS], reg_ip, raw_opcode_id, xlat_opcode_id, i_w, i_d);
+        }
+        if (regs16[REG_CS] == 0 || reg_ip == 0) {
+            LOGI2("WARNING: CS=%04X IP=%04X at inst #%d (raw=0x%02X, xlat=%d)", regs16[REG_CS], reg_ip, inst_counter, raw_opcode_id, xlat_opcode_id);
+        }
         
         i_w = (i_reg4bit = raw_opcode_id & 7) & 1;
         i_d = i_reg4bit / 2 & 1;
@@ -574,12 +601,6 @@ void emulator_step(int max_instructions) {
                 i_data1 = (char)i_data1;
             
             DECODE_RM_REG;
-        }
-        
-        // Log JMP FAR (opcode EA) execution
-        if (raw_opcode_id == 0xEA) {
-            LOGI2("DECODE: raw_opcode=EA, xlat_opcode_id=%d, i_reg4bit=%d, i_w=%d, i_d=%d, i_data0=%04X, i_data2=%04X, CS:IP=%04X:%04X", 
-                  xlat_opcode_id, i_reg4bit, i_w, i_d, i_data0, i_data2, regs16[REG_CS], reg_ip);
         }
         
         switch (xlat_opcode_id)
@@ -622,8 +643,10 @@ void emulator_step(int max_instructions) {
                     OPCODE 5: // IMUL
                         i_w ? MUL_MACRO(short, regs16) : MUL_MACRO(char, regs8);
                     OPCODE 6: // DIV
+                        LOGI2("DIV: i_w=%d rm_addr=0x%X mem[rm_addr]=0x%02X DX=%04X AX=%04X", i_w, rm_addr, mem[rm_addr], regs16[REG_DX], regs16[REG_AX]);
                         i_w ? DIV_MACRO(unsigned short, unsigned, regs16) : DIV_MACRO(unsigned char, unsigned short, regs8);
                     OPCODE 7: // IDIV
+                        LOGI2("IDIV: i_w=%d rm_addr=0x%X mem[rm_addr]=0x%02X DX=%04X AX=%04X", i_w, rm_addr, mem[rm_addr], regs16[REG_DX], regs16[REG_AX]);
                         i_w ? DIV_MACRO(short, int, regs16) : DIV_MACRO(char, short, regs8);
                 }
             OPCODE 7: // ADD|OR|ADC|SBB|AND|SUB|XOR|CMP AL/AX, immed
@@ -722,15 +745,10 @@ void emulator_step(int max_instructions) {
                 reg_ip += 3 - i_d;
                 if (!i_w) {
                     if (i_d) { // JMP far
-                        // JMP FAR is 5 bytes: EA offset_low offset_high segment_low segment_high
-                        // Read full 16-bit segment from opcode_stream[3] | (opcode_stream[4] << 8)
-                        unsigned short target_segment = (unsigned short)opcode_stream[3] | ((unsigned short)opcode_stream[4] << 8);
-                        LOGI2("JMP FAR: raw_opcode=%02X, i_data0=%04X, target_seg=%04X, old_CS=%04X, old_IP=%04X",
-                              raw_opcode_id, i_data0, target_segment, regs16[REG_CS], reg_ip);
-                        reg_ip = i_data0;
-                        regs16[REG_CS] = target_segment;
-                        LOGI2("JMP FAR: new_CS=%04X, new_IP=%04X", regs16[REG_CS], reg_ip);
-                    } else // CALL
+                        LOGI2("JMP FAR: i_data0=%04X i_data2=%04X -> CS=%04X IP=0000", i_data0, i_data2, i_data2);
+                        reg_ip = 0, regs16[REG_CS] = i_data2;
+                    }
+                    else // CALL
                         R_M_PUSH(reg_ip);
                 }
                 reg_ip += i_d && i_w ? (char)i_data0 : i_data0;
@@ -990,9 +1008,6 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
             argv[argc++] = token;
             token = strtok(NULL, " ");
         }
-        // Don't free cmd_copy yet - argv[] pointers reference its buffer
-        // and emulator_init() uses them. Memory leak is acceptable for
-        // a long-running emulator process.
     }
     
     LOGI2("Calling emulator_init with argc=%d", argc);
@@ -1000,17 +1015,25 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
         LOGI2("argv[%d] = '%s'", i, argv[i]);
     }
     
-emulator_init(argc, argv);
-
-    LOGI2("nativeInit8086: after emulator_init, reg_ip=0x%04X, regs16[CS]=0x%04X", reg_ip, regs16[REG_CS]);
-
+    emulator_init(argc, argv);
+    emulator_initialized = 1;
+    
     if (curdir) (*env)->ReleaseStringUTFChars(env, jcurdir, curdir);
     if (cmdline) (*env)->ReleaseStringUTFChars(env, jcmdline, cmdline);
 }
 
 JNIEXPORT void JNICALL
 Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz) {
-    LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X", reg_ip, regs16[REG_CS]);
+    __android_log_print(ANDROID_LOG_INFO, "8086tiny", "=== nativeStepFrame8086 DIRECT ENTRY ===");
+    LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X, initialized=%d", reg_ip, regs16[REG_CS], emulator_initialized);
+    
+    // Auto-initialize if not already done (safety net for Activity brought to front)
+    if (!emulator_initialized) {
+        LOGI2("nativeStepFrame8086: AUTO-INIT - emulator not initialized, calling emulator_init");
+        emulator_init(3, (char*[]){"8086tiny", "bios", "fd.img"});
+        emulator_initialized = 1;
+    }
+    
     emulator_step(10000);
     LOGI2("nativeStepFrame8086: after step, reg_ip=0x%04X, regs16[CS]=0x%04X, inst_counter=%d", reg_ip, regs16[REG_CS], inst_counter);
     render_text_mode();
@@ -1083,7 +1106,7 @@ int main(int argc, char **argv)
     
     // Desktop builds: run in a continuous loop
     while (1) {
-emulator_step(10000);
+        emulator_step(10000);
     }
     
     return 0;

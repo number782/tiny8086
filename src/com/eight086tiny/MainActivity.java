@@ -40,10 +40,10 @@ public class MainActivity extends Activity {
     private int frameWidth = 320;
     private int frameHeight = 200;
     
-    @Override
+@Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Log.i("8086tiny", "onCreate called");
+        Log.i("8086tiny", "=== onCreate START ===");
         
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
@@ -52,22 +52,40 @@ public class MainActivity extends Activity {
         
         emulatorView = new EmulatorView(this);
         setContentView(emulatorView);
+        Log.i("8086tiny", "=== onCreate: after setContentView ===");
         
         int[] size = new int[2];
         nativeGetScreenSize8086(size);
         frameWidth = size[0];
         frameHeight = size[1];
-        Log.i("8086tiny", "Screen size: " + frameWidth + "x" + frameHeight);
+        Log.i("8086tiny", "=== onCreate: Screen size: " + frameWidth + "x" + frameHeight);
         
         nativeSetEmulatorView(emulatorView);
+        Log.i("8086tiny", "=== onCreate: after nativeSetEmulatorView ===");
 
-running = true;
+        running = true;
+        Log.i("8086tiny", "=== onCreate: starting emulator thread ===");
         emulatorThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                Log.i("8086tiny", "Emulator thread STARTED (id=" + Thread.currentThread().getId() + ")");
-                nativeInit8086("/sdcard/8086tiny", "bios fd.img");
-                Log.i("8086tiny", "nativeInit8086 returned");
+                Log.i("8086tiny", "=== Emulator thread STARTED (id=" + Thread.currentThread().getId() + ") ===");
+                try {
+                    Log.i("8086tiny", "=== About to call nativeInit8086 ===");
+                    nativeInit8086("/sdcard/8086tiny", "bios fd.img");
+                    Log.i("8086tiny", "=== nativeInit8086 returned ===");
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e("8086tiny", "=== UnsatisfiedLinkError in nativeInit8086: " + e.getMessage() + " ===");
+                    e.printStackTrace();
+                    return;
+                } catch (Exception e) {
+                    Log.e("8086tiny", "=== Exception in nativeInit8086: " + e.getMessage() + " ===");
+                    e.printStackTrace();
+                    return;
+                } catch (Error e) {
+                    Log.e("8086tiny", "=== Error in nativeInit8086: " + e.getMessage() + " ===");
+                    e.printStackTrace();
+                    return;
+                }
                 int frameCount = 0;
                 while (running) {
                     nativeStepFrame8086();
@@ -160,17 +178,20 @@ running = true;
     
     @Override
     protected void onDestroy() {
+        Log.i("8086tiny", "=== onDestroy: stopping emulator thread ===");
         running = false;
         Thread t = emulatorThread;
         if (t != null) {
             t.interrupt();
             try {
-                t.join(1000);
+                t.join(2000);
+                Log.i("8086tiny", "=== onDestroy: emulator thread joined ===");
             } catch (InterruptedException e) {
-                // ignore
+                Log.i("8086tiny", "=== onDestroy: join interrupted ===");
             }
         }
-        super.onDestroy();
+        Log.i("8086tiny", "=== onDestroy: calling System.exit(0) ===");
+        System.exit(0);
     }
 
     @Override

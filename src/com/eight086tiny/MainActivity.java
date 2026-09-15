@@ -71,7 +71,7 @@ public class MainActivity extends Activity {
                 Log.i("8086tiny", "=== Emulator thread STARTED (id=" + Thread.currentThread().getId() + ") ===");
                 try {
                     Log.i("8086tiny", "=== About to call nativeInit8086 ===");
-                    nativeInit8086("/sdcard/8086tiny", "bios fd.img");
+                    nativeInit8086("/sdcard", "bios fd.img");
                     Log.i("8086tiny", "=== nativeInit8086 returned ===");
                 } catch (UnsatisfiedLinkError e) {
                     Log.e("8086tiny", "=== UnsatisfiedLinkError in nativeInit8086: " + e.getMessage() + " ===");

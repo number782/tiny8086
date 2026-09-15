@@ -237,16 +237,46 @@ void set_opcode(unsigned char opcode)
 // Execute INT #interrupt_num on the emulated machine
 char pc_interrupt(unsigned char interrupt_num)
 {
-    unsigned short ivt_ip = (unsigned short)mem[4 * interrupt_num];
-    unsigned short ivt_cs = (unsigned short)mem[4 * interrupt_num + 2];
+    // Special case: INT 3 (breakpoint) - this BIOS has a broken INT 3 handler that loops.
+    // Just IRET to avoid infinite loop. Advance IP past the 1-byte INT 3 instruction (0xCC).
+    if (interrupt_num == 3) {
+        LOGI2("INT 03: executing IRET (bypassing broken handler at IVT[3]), advancing IP");
+        reg_ip += 1;
+        return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
+    }
+    
+    // Special case: INT 1 (single step) - this BIOS has broken single-step handler.
+    // Just IRET to avoid infinite loop.
+    if (interrupt_num == 1) {
+        LOGI2("INT 01: executing IRET (bypassing broken handler at IVT[1])");
+        return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
+    }
+    
+    // Debug: log INT 10h (video), INT 13h (disk), and INT 19h (bootstrap) calls
+    if (interrupt_num == 0x10 || interrupt_num == 0x13 || interrupt_num == 0x19) {
+        LOGI2("INT %02X: AH=%02X AL=%02X BX=%04X CX=%04X DX=%04X ES=%04X",
+              interrupt_num, regs8[REG_AH], regs8[REG_AL], regs16[REG_BX], regs16[REG_CX], regs16[REG_DX], regs16[REG_ES]);
+    }
+    
+    // Debug: log IVT for INT 10h, INT 13h and INT 19h on first call
+    if (interrupt_num == 0x10 || interrupt_num == 0x13 || interrupt_num == 0x19) {
+        unsigned short ivt_ip = mem[4 * interrupt_num] | (mem[4 * interrupt_num + 1] << 8);
+        unsigned short ivt_cs = mem[4 * interrupt_num + 2] | (mem[4 * interrupt_num + 3] << 8);
+        LOGI2("INT %02X IVT: IP=%04X CS=%04X (phys=%05X)", interrupt_num, ivt_ip, ivt_cs, (ivt_cs << 4) + ivt_ip);
+    }
+    
+    unsigned short ivt_ip = mem[4 * interrupt_num] | (mem[4 * interrupt_num + 1] << 8);
+    unsigned short ivt_cs = mem[4 * interrupt_num + 2] | (mem[4 * interrupt_num + 3] << 8);
     set_opcode(0xCD); // Decode like INT
 
     make_flags();
     R_M_PUSH(scratch_uint);
     R_M_PUSH(regs16[REG_CS]);
     R_M_PUSH(reg_ip);
-    MEM_OP(REGS_BASE + 2 * REG_CS, =, 4 * interrupt_num + 2);
-    R_M_OP(reg_ip, =, mem[4 * interrupt_num]);
+    // Write 16-bit CS and IP to registers (both low and high bytes)
+    mem[REGS_BASE + 2 * REG_CS] = ivt_cs & 0xFF;
+    mem[REGS_BASE + 2 * REG_CS + 1] = ivt_cs >> 8;
+    reg_ip = ivt_ip;
     LOGI2("INT %02X: IVT[%02X] IP=%04X CS=%04X -> CS:IP=%04X:%04X", interrupt_num, interrupt_num, ivt_ip, ivt_cs, regs16[REG_CS], reg_ip);
     if (regs16[REG_CS] == 0)
         LOGI2("WARNING: INT %02X set CS=0! IVT raw bytes: [0x%02X,0x%02X,0x%02X,0x%02X]", interrupt_num, mem[4*interrupt_num], mem[4*interrupt_num+1], mem[4*interrupt_num+2], mem[4*interrupt_num+3]);
@@ -390,11 +420,21 @@ static const unsigned char font8x8_basic[96][8] = {
 
 // Render text mode video RAM (B800:0) to text_framebuffer
 void render_text_mode() {
-    unsigned char *text_vram = mem + 0xB8000;
+    unsigned short crtc_start_addr = (mem[0x4AE] << 8) | mem[0x4AD];
+    unsigned char *text_vram = mem + 0xB8000 + (crtc_start_addr * 2);
     int char_width = 8;
     int char_height = 8;
     int cols = 80;
     int rows = 25;
+    
+    static int render_call_count = 0;
+    render_call_count++;
+    if (render_call_count % 100 == 1) {
+        LOGI2("render_text_mode: call #%d, crtc_start=0x%04X, text_vram[0]=0x%02X, text_vram[1]=0x%02X, text_vram[2]=0x%02X, INT10h_vec=%04X:%04X, mem[0xB8000]=0x%02X, mem[0xB8001]=0x%02X, mem[0xB8002]=0x%02X",
+              render_call_count, crtc_start_addr, text_vram[0], text_vram[1], text_vram[2],
+              *(unsigned short*)(mem + 0x40), *(unsigned short*)(mem + 0x42),
+              mem[0xB8000], mem[0xB8001], mem[0xB8002]);
+    }
     
     // Clear framebuffer to black
     for (int i = 0; i < text_fb_width * text_fb_height; i++) {
@@ -442,6 +482,7 @@ void render_text_mode() {
 
 // Emulator initialization function (formerly main() initialization logic)
 void emulator_init(int argc, char **argv) {
+    LOGI2("=== EMULATOR_INIT CALLED ===");
     LOGI2("emulator_init: entered, argc=%d", argc);
     for (int i = 0; i < argc; i++) LOGI2("emulator_init: argv[%d]=%s", i, argv[i]);
     
@@ -483,10 +524,21 @@ void emulator_init(int argc, char **argv) {
     LOGI2("emulator_init: BIOS loaded");
     
     // Copy IVT template from F000:0000 to 0000:0000 (first 1KB = 256 vectors * 4 bytes)
-    for (int i = 0; i < 0x400; i++) {
+    // IVT is split: first 256 bytes at F000:0000, next 768 at F000:0100
+    for (int i = 0; i < 0x100; i++) {
         mem[i] = regs8[i];
     }
+    for (int i = 0; i < 0x300; i++) {
+        mem[0x100 + i] = regs8[0x100 + i];
+    }
     LOGI2("emulator_init: IVT copied to 0000:0000");
+    // Debug: log key IVT vectors
+    LOGI2("IVT DEBUG: INT 00 = %04X:%04X (F000:0000=[%02X %02X %02X %02X])", mem[0]|(mem[1]<<8), mem[2]|(mem[3]<<8), regs8[0], regs8[1], regs8[2], regs8[3]);
+    LOGI2("IVT DEBUG: INT 01 = %04X:%04X (F000:0004=[%02X %02X %02X %02X])", mem[4]|(mem[5]<<8), mem[6]|(mem[7]<<8), regs8[4], regs8[5], regs8[6], regs8[7]);
+    LOGI2("IVT DEBUG: INT 03 = %04X:%04X (F000:000C=[%02X %02X %02X %02X])", mem[12]|(mem[13]<<8), mem[14]|(mem[15]<<8), regs8[12], regs8[13], regs8[14], regs8[15]);
+    LOGI2("IVT DEBUG: INT 10h = %04X:%04X (F000:0040=[%02X %02X %02X %02X])", mem[64]|(mem[65]<<8), mem[66]|(mem[67]<<8), regs8[64], regs8[65], regs8[66], regs8[67]);
+    LOGI2("IVT DEBUG: INT 13h = %04X:%04X (F000:004C=[%02X %02X %02X %02X])", mem[76]|(mem[77]<<8), mem[78]|(mem[79]<<8), regs8[76], regs8[77], regs8[78], regs8[79]);
+    LOGI2("IVT DEBUG: INT 19h = %04X:%04X (F000:0064=[%02X %02X %02X %02X])", mem[100]|(mem[101]<<8), mem[102]|(mem[103]<<8), regs8[100], regs8[101], regs8[102], regs8[103]);
     
     // Install reset vector at F000:FFF0 (JMP FAR F000:0100)
     regs8[0xFFF0] = 0xEA;  // JMP FAR opcode
@@ -511,6 +563,144 @@ void emulator_init(int argc, char **argv) {
     LOGI2("  TABLE_BASE_INST_SIZE[01]=%d, TABLE_I_MOD_SIZE[01]=%d",
           bios_table_lookup[12][1], bios_table_lookup[14][1]);
     
+    // Patch corrupted BIOS tables with correct values
+    // TABLE_I_MOD_SIZE (14): 1 for modrm opcodes, 0 otherwise
+    // TABLE_BASE_INST_SIZE (12): base instruction length
+    // TABLE_I_W_SIZE (13): W bit size adjustment
+    for (int i = 0; i < 256; i++) {
+        unsigned char op = i;
+        unsigned char op0 = op & 0xF8;
+        unsigned char op1 = op & 0xFE;
+        
+        // Most opcodes in 0x00-0xFF use modrm (i_mod_size=1), except:
+        // 0x06,0x0E,0x16,0x1E (PUSH ES/CS/SS/DS) - no modrm
+        // 0x07,0x0F,0x17,0x1F (POP ES/CS/SS/DS) - no modrm
+        // 0x27 (DAA), 0x2F (DAS), 0x37 (AAA), 0x3F (AAS) - no modrm
+        // 0x40-0x47 (INC reg), 0x48-0x4F (DEC reg) - no modrm
+        // 0x50-0x57 (PUSH reg), 0x58-0x5F (POP reg) - no modrm
+        // 0x60 (PUSHA), 0x61 (POPA) - no modrm
+        // 0x90 (NOP), 0x91-0x97 (XCHG AX,reg) - no modrm
+        // 0x98 (CBW), 0x99 (CWD) - no modrm
+        // 0x9A (CALL far), 0x9B (WAIT) - no modrm
+        // 0x9C (PUSHF), 0x9D (POPF) - no modrm
+        // 0x9E (SAHF), 0x9F (LAHF) - no modrm
+        // 0xA0-0xA3 (MOV AL/AX,[addr]) - no modrm
+        // 0xA4-0xA5 (MOVS), 0xA6-0xA7 (CMPS) - no modrm
+        // 0xA8-0xA9 (TEST AL/AX,imm) - no modrm
+        // 0xAA-0xAF (STOS/LODS/SCAS) - no modrm
+        // 0xB0-0xBF (MOV reg,imm) - no modrm
+        // 0xC0-0xC1 (shift/rotate) - has modrm
+        // 0xC2 (RET imm), 0xC3 (RET) - no modrm
+        // 0xC4 (LES), 0xC5 (LDS) - has modrm
+        // 0xC6-0xC7 (MOV r/m,imm) - has modrm
+        // 0xC8 (ENTER), 0xC9 (LEAVE) - no modrm
+        // 0xCA (RETF imm), 0xCB (RETF) - no modrm
+        // 0xCC (INT 3), 0xCD (INT imm), 0xCE (INTO), 0xCF (IRET) - no modrm
+        // 0xD0-0xD3 (shift/rotate) - has modrm
+        // 0xD4 (AAM), 0xD5 (AAD) - no modrm
+        // 0xD6 (SALC), 0xD7 (XLAT) - no modrm
+        // 0xD8-0xDF (FPU) - has modrm mostly
+        // 0xE0-0xE3 (LOOP/JCXZ) - no modrm
+        // 0xE4-0xE5 (IN AL/AX,imm8) - no modrm
+        // 0xE6-0xE7 (OUT imm8,AL/AX) - no modrm
+        // 0xE8 (CALL near), 0xE9 (JMP near) - no modrm
+        // 0xEA (JMP far), 0xEB (JMP short) - no modrm
+        // 0xEC-0xEF (IN/OUT DX,AL/AX) - no modrm
+        // 0xF0 (LOCK), 0xF2 (REPNE), 0xF3 (REP) - prefixes
+        // 0xF4 (HLT), 0xF5 (CMC) - no modrm
+        // 0xF6-0xF7 (TEST/NOT/NEG/MUL/IMUL/DIV/IDIV) - has modrm
+        // 0xF8 (CLC), 0xF9 (STC), 0xFA (CLI), 0xFB (STI) - no modrm
+        // 0xFC (CLD), 0xFD (STD) - no modrm
+        // 0xFE-0xFF (INC/DEC/PUSH/CALL/JMP/PUSH) - has modrm
+        
+        int has_modrm = 0;
+        int base_size = 1;
+        int w_size = 0;
+        
+        if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||  // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m,reg
+            (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||  // ADC/SBB reg,r/m
+            (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||  // AND/SUB reg,r/m
+            (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||  // XOR/CMP reg,r/m
+            op == 0x62 || op == 0x63 ||  // BOUND, ARPL
+            (op >= 0x68 && op <= 0x6B) ||  // PUSH/IMUL imm
+            op == 0x6C || op == 0x6D || op == 0x6E || op == 0x6F ||  // INS/OUTS
+            (op >= 0x80 && op <= 0x83) ||  // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m,imm
+            (op >= 0x84 && op <= 0x87) ||  // TEST/XCHG reg,r/m
+            (op >= 0x88 && op <= 0x8F) ||  // MOV reg,r/m / MOV r/m,reg / POP r/m
+            (op >= 0xC0 && op <= 0xC1) ||  // Shift/rotate r/m,imm
+            op == 0xC4 || op == 0xC5 ||  // LES/LDS
+            (op >= 0xC6 && op <= 0xC7) ||  // MOV r/m,imm
+            (op >= 0xD0 && op <= 0xD3) ||  // Shift/rotate r/m,1/CL
+            (op >= 0xD8 && op <= 0xDF) ||  // FPU
+            (op >= 0xF6 && op <= 0xF7) ||  // TEST/NOT/NEG/MUL/IMUL/DIV/IDIV
+            (op >= 0xFE && op <= 0xFF)) {  // INC/DEC/PUSH/CALL/JMP/PUSH
+            has_modrm = 1;
+            base_size = 2;
+        }
+        
+        if ((op & 1) && (op0 == 0x00 || op0 == 0x08 || op0 == 0x10 || op0 == 0x18 || 
+                         op0 == 0x20 || op0 == 0x28 || op0 == 0x30 || op0 == 0x38 ||
+                         op0 == 0x80 || op0 == 0x88 || op0 == 0xC6 || op0 == 0xF6)) {
+            w_size = 1;
+        }
+        
+        bios_table_lookup[14][i] = has_modrm ? 1 : 0;
+        bios_table_lookup[12][i] = base_size;
+        bios_table_lookup[13][i] = w_size;
+    }
+    
+    // Fix TABLE_STD_FLAGS (10): default to FLAGS_UPDATE_SZP for arithmetic/logic
+    for (int i = 0; i < 256; i++) {
+        unsigned char op = i;
+        int flags = 0;
+        if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||
+            (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||
+            (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||
+            (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||
+            (op >= 0x80 && op <= 0x83) || (op >= 0xF6 && op <= 0xF7)) {
+            flags = 1 | 2;  // FLAGS_UPDATE_SZP | FLAGS_UPDATE_AO_ARITH
+        } else if ((op >= 0x20 && op <= 0x25) || (op >= 0x30 && op <= 0x35) ||
+                   (op >= 0x80 && op <= 0x83) || op == 0xF6 || op == 0xF7) {
+            flags = 1 | 4;  // FLAGS_UPDATE_SZP | FLAGS_UPDATE_OC_LOGIC
+        } else if ((op >= 0x84 && op <= 0x87) || (op >= 0xA8 && op <= 0xA9)) {
+            flags = 1;  // FLAGS_UPDATE_SZP only
+        }
+        bios_table_lookup[10][i] = flags;
+    }
+    
+    // Fix TABLE_XLAT_SUBFUNCTION (9): all zeros is fine for most
+    // Fix TABLE_COND_JUMP_DECODE_A/B/C/D (15-18): set up for conditional jumps
+    for (int i = 0; i < 256; i++) {
+        bios_table_lookup[15][i] = bios_table_lookup[16][i] = bios_table_lookup[17][i] = bios_table_lookup[18][i] = 0;
+    }
+    // JAE/JB: 0x72/0x73 -> FLAG_CF
+    bios_table_lookup[15][0x72] = bios_table_lookup[15][0x73] = FLAG_CF;
+    bios_table_lookup[16][0x72] = bios_table_lookup[16][0x73] = FLAG_CF;
+    // JE/JNE: 0x74/0x75 -> FLAG_ZF
+    bios_table_lookup[15][0x74] = bios_table_lookup[15][0x75] = FLAG_ZF;
+    bios_table_lookup[16][0x74] = bios_table_lookup[16][0x75] = FLAG_ZF;
+    // JBE/JA: 0x76/0x77 -> FLAG_CF, FLAG_ZF
+    bios_table_lookup[15][0x76] = bios_table_lookup[15][0x77] = FLAG_CF;
+    bios_table_lookup[16][0x76] = bios_table_lookup[16][0x77] = FLAG_ZF;
+    bios_table_lookup[17][0x76] = bios_table_lookup[17][0x77] = FLAG_CF;
+    bios_table_lookup[18][0x76] = bios_table_lookup[18][0x77] = FLAG_ZF;
+    // JS/JNS: 0x78/0x79 -> FLAG_SF
+    bios_table_lookup[15][0x78] = bios_table_lookup[15][0x79] = FLAG_SF;
+    bios_table_lookup[16][0x78] = bios_table_lookup[16][0x79] = FLAG_SF;
+    // JP/JNP: 0x7A/0x7B -> FLAG_PF
+    bios_table_lookup[15][0x7A] = bios_table_lookup[15][0x7B] = FLAG_PF;
+    bios_table_lookup[16][0x7A] = bios_table_lookup[16][0x7B] = FLAG_PF;
+    // JL/JGE: 0x7C/0x7D -> FLAG_SF, FLAG_OF
+    bios_table_lookup[15][0x7C] = bios_table_lookup[15][0x7D] = FLAG_SF;
+    bios_table_lookup[16][0x7C] = bios_table_lookup[16][0x7D] = FLAG_OF;
+    bios_table_lookup[17][0x7C] = bios_table_lookup[17][0x7D] = FLAG_SF;
+    bios_table_lookup[18][0x7C] = bios_table_lookup[18][0x7D] = FLAG_OF;
+    // JLE/JG: 0x7E/0x7F -> FLAG_ZF, FLAG_SF, FLAG_OF
+    bios_table_lookup[15][0x7E] = bios_table_lookup[15][0x7F] = FLAG_ZF;
+    bios_table_lookup[16][0x7E] = bios_table_lookup[16][0x7F] = FLAG_SF;
+    bios_table_lookup[17][0x7E] = bios_table_lookup[17][0x7F] = FLAG_OF;
+    bios_table_lookup[18][0x7E] = bios_table_lookup[18][0x7F] = FLAG_ZF;
+    
     // Now set up registers AFTER loading tables
     regs16[REG_CS] = 0xF000;
     reg_ip = 0x100;
@@ -518,7 +708,11 @@ void emulator_init(int argc, char **argv) {
 
 // Emulator step function (formerly main() loop)
 void emulator_step(int max_instructions) {
-    LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
+    static int step_call_count = 0;
+    step_call_count++;
+    if (step_call_count <= 3 || step_call_count % 500 == 0) {
+        LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
+    }
     int instructions_executed = 0;
     
     for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
@@ -549,6 +743,58 @@ void emulator_step(int max_instructions) {
             for (int i = 0; i < 20; i++)
                 for (int j = 0; j < 256; j++)
                     bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
+            // Patch corrupted BIOS tables (same as in emulator_init)
+            for (int i = 0; i < 256; i++) {
+                unsigned char op = i;
+                unsigned char op0 = op & 0xF8;
+                int has_modrm = 0, base_size = 1, w_size = 0;
+                if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||
+                    (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||
+                    (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||
+                    (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||
+                    op == 0x62 || op == 0x63 || (op >= 0x68 && op <= 0x6B) ||
+                    (op >= 0x6C && op <= 0x6F) || (op >= 0x80 && op <= 0x8F) ||
+                    (op >= 0xC0 && op <= 0xC1) || op == 0xC4 || op == 0xC5 ||
+                    (op >= 0xC6 && op <= 0xC7) || (op >= 0xD0 && op <= 0xD3) ||
+                    (op >= 0xD8 && op <= 0xDF) || (op >= 0xF6 && op <= 0xFF)) {
+                    has_modrm = 1; base_size = 2;
+                }
+                if ((op & 1) && (op0 == 0x00 || op0 == 0x08 || op0 == 0x10 || op0 == 0x18 ||
+                                 op0 == 0x20 || op0 == 0x28 || op0 == 0x30 || op0 == 0x38 ||
+                                 op0 == 0x80 || op0 == 0x88 || op0 == 0xC6 || op0 == 0xF6)) {
+                    w_size = 1;
+                }
+                bios_table_lookup[14][i] = has_modrm ? 1 : 0;
+                bios_table_lookup[12][i] = base_size;
+                bios_table_lookup[13][i] = w_size;
+            }
+            for (int i = 0; i < 256; i++) {
+                unsigned char op = i;
+                int flags = 0;
+                if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||
+                    (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||
+                    (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||
+                    (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||
+                    (op >= 0x80 && op <= 0x83) || (op >= 0xF6 && op <= 0xF7)) {
+                    flags = 1 | 2;
+                } else if ((op >= 0x84 && op <= 0x87) || (op >= 0xA8 && op <= 0xA9)) {
+                    flags = 1;
+                }
+                bios_table_lookup[10][i] = flags;
+            }
+            for (int i = 0; i < 256; i++) {
+                bios_table_lookup[15][i] = bios_table_lookup[16][i] = bios_table_lookup[17][i] = bios_table_lookup[18][i] = 0;
+            }
+            bios_table_lookup[15][0x72] = bios_table_lookup[15][0x73] = bios_table_lookup[16][0x72] = bios_table_lookup[16][0x73] = FLAG_CF;
+            bios_table_lookup[15][0x74] = bios_table_lookup[15][0x75] = bios_table_lookup[16][0x74] = bios_table_lookup[16][0x75] = FLAG_ZF;
+            bios_table_lookup[15][0x76] = bios_table_lookup[15][0x77] = bios_table_lookup[17][0x76] = bios_table_lookup[17][0x77] = FLAG_CF;
+            bios_table_lookup[16][0x76] = bios_table_lookup[16][0x77] = bios_table_lookup[18][0x76] = bios_table_lookup[18][0x77] = FLAG_ZF;
+            bios_table_lookup[15][0x78] = bios_table_lookup[15][0x79] = bios_table_lookup[16][0x78] = bios_table_lookup[16][0x79] = FLAG_SF;
+            bios_table_lookup[15][0x7A] = bios_table_lookup[15][0x7B] = bios_table_lookup[16][0x7A] = bios_table_lookup[16][0x7B] = FLAG_PF;
+            bios_table_lookup[15][0x7C] = bios_table_lookup[15][0x7D] = bios_table_lookup[17][0x7C] = bios_table_lookup[17][0x7D] = FLAG_SF;
+            bios_table_lookup[16][0x7C] = bios_table_lookup[16][0x7D] = bios_table_lookup[18][0x7C] = bios_table_lookup[18][0x7D] = FLAG_OF;
+            bios_table_lookup[15][0x7E] = bios_table_lookup[15][0x7F] = bios_table_lookup[17][0x7E] = bios_table_lookup[17][0x7F] = FLAG_ZF;
+            bios_table_lookup[16][0x7E] = bios_table_lookup[16][0x7F] = bios_table_lookup[18][0x7E] = bios_table_lookup[18][0x7F] = FLAG_SF;
             mem[0x4A6] = 0;
             io_ports[0x64] = 0;
             inst_counter = 0;
@@ -562,13 +808,16 @@ void emulator_step(int max_instructions) {
         
         set_opcode(*opcode_stream);
         
-        // Debug: log instruction at stuck address
-        if (regs16[REG_CS] == 0x17B8 && reg_ip == 0x1798) {
-            unsigned int phys = 16 * regs16[REG_CS] + reg_ip;
-            LOGI2("STUCK: CS=%04X IP=%04X phys=%05X raw=%02X xlat=%d opcode_stream[0]=%02X opcode_stream[1]=%02X opcode_stream[2]=%02X",
-                  regs16[REG_CS], reg_ip, phys, raw_opcode_id, xlat_opcode_id,
-                  opcode_stream[0], opcode_stream[1], opcode_stream[2]);
-        }
+// Debug: log instruction at stuck address (rate limited)
+         static int stuck_count = 0;
+         if (regs16[REG_CS] == 0x17B8 && reg_ip == 0x1798) {
+             if (++stuck_count % 10000 == 1) {
+                 unsigned int phys = 16 * regs16[REG_CS] + reg_ip;
+                 LOGI2("STUCK: CS=%04X IP=%04X phys=%05X raw=%02X xlat=%d opcode_stream[0]=%02X opcode_stream[1]=%02X opcode_stream[2]=%02X (count=%d)",
+                       regs16[REG_CS], reg_ip, phys, raw_opcode_id, xlat_opcode_id,
+                       opcode_stream[0], opcode_stream[1], opcode_stream[2], stuck_count);
+             }
+         }
         
         if (inst_counter < 200) {
             LOGI2("INST #%d: CS:IP=%04X:%04X, raw=0x%02X, xlat=%d, i_w=%d, i_d=%d", inst_counter, regs16[REG_CS], reg_ip, raw_opcode_id, xlat_opcode_id, i_w, i_d);
@@ -976,7 +1225,9 @@ void emulator_step(int max_instructions) {
         instructions_executed++;
     }
     
-    LOGI2("emulator_step: executed %d instructions (completed %d)", instructions_executed, max_instructions);
+    if (step_call_count <= 3 || step_call_count % 500 == 0) {
+        LOGI2("emulator_step: executed %d instructions (completed %d)", instructions_executed, max_instructions);
+    }
 }
 
 // JNI Bridge Functions
@@ -1024,18 +1275,37 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
 
 JNIEXPORT void JNICALL
 Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz) {
-    __android_log_print(ANDROID_LOG_INFO, "8086tiny", "=== nativeStepFrame8086 DIRECT ENTRY ===");
-    LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X, initialized=%d", reg_ip, regs16[REG_CS], emulator_initialized);
+    static int step_count = 0;
+    step_count++;
+    if (step_count <= 5 || step_count % 100 == 0) {
+        __android_log_print(ANDROID_LOG_INFO, "8086tiny", "=== nativeStepFrame8086 DIRECT ENTRY ===");
+        LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X, initialized=%d, TABLE_I_MOD_SIZE[0]=%d", 
+              reg_ip, regs16[REG_CS], emulator_initialized, bios_table_lookup[14][0]);
+    }
     
-    // Auto-initialize if not already done (safety net for Activity brought to front)
-    if (!emulator_initialized) {
-        LOGI2("nativeStepFrame8086: AUTO-INIT - emulator not initialized, calling emulator_init");
+    // Force re-init if not initialized OR tables are corrupted (I_MOD_SIZE[0] should be 0, 1, or 2)
+    int tables_ok = bios_table_lookup[14][0] <= 2 && bios_table_lookup[14][0] >= 0;
+    if (!emulator_initialized || !tables_ok) {
+        if (!tables_ok) {
+            LOGI2("nativeStepFrame8086: TABLES CORRUPTED (I_MOD_SIZE[0]=%d), FORCING RE-INIT", bios_table_lookup[14][0]);
+        } else {
+            LOGI2("nativeStepFrame8086: AUTO-INIT - emulator not initialized, calling emulator_init");
+        }
+        __android_log_print(ANDROID_LOG_INFO, "8086tiny", "AUTO-INIT: calling emulator_init");
+        chdir("/sdcard");
         emulator_init(3, (char*[]){"8086tiny", "bios", "fd.img"});
         emulator_initialized = 1;
+        LOGI2("nativeStepFrame8086: AUTO-INIT complete, initialized=%d", emulator_initialized);
+    } else {
+        if (step_count <= 5 || step_count % 100 == 0) {
+            LOGI2("nativeStepFrame8086: SKIPPING AUTO-INIT, emulator_initialized=%d", emulator_initialized);
+        }
     }
     
     emulator_step(10000);
-    LOGI2("nativeStepFrame8086: after step, reg_ip=0x%04X, regs16[CS]=0x%04X, inst_counter=%d", reg_ip, regs16[REG_CS], inst_counter);
+    if (step_count <= 5 || step_count % 100 == 0) {
+        LOGI2("nativeStepFrame8086: after step, reg_ip=0x%04X, regs16[CS]=0x%04X, inst_counter=%d", reg_ip, regs16[REG_CS], inst_counter);
+    }
     render_text_mode();
 }
 

@@ -16,7 +16,7 @@ import android.view.WindowManager;
 public class MainActivity extends Activity {
     static {
         try {
-            java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+            java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", false);
             fw.write("STATIC BLOCK START\n");
             fw.close();
         } catch (Exception e) {}

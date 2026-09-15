@@ -482,6 +482,9 @@ void render_text_mode() {
 
 // Emulator initialization function (formerly main() initialization logic)
 void emulator_init(int argc, char **argv) {
+    FILE *f = fopen("/sdcard/8086tiny/native.log", "a");
+    if (f) { fprintf(f, "emulator_init ENTRY\\n"); fclose(f); }
+    LOGI2(">>> emulator_init ENTRY <<<");
     LOGI2("=== EMULATOR_INIT CALLED ===");
     LOGI2("emulator_init: entered, argc=%d", argc);
     for (int i = 0; i < argc; i++) LOGI2("emulator_init: argv[%d]=%s", i, argv[i]);
@@ -507,10 +510,17 @@ void emulator_init(int argc, char **argv) {
     regs8[REG_DL] = ((argc > 3) && (*argv[3] == '@')) ? argv[3]++, 0x80 : 0;
     
     // Open BIOS (file id disk[2]), floppy disk image (disk[1]), and hard disk image (disk[0]) if specified
-    LOGI2("emulator_init: opening files");
+    LOGI2("emulator_init: opening files, argv[1]=%s argv[2]=%s", argv[1] ? argv[1] : "NULL", argv[2] ? argv[2] : "NULL");
+    LOGI2("emulator_init: cwd = %s", getcwd(NULL, 0));
     for (file_index = 3; file_index;)
-        disk[--file_index] = *++argv ? open(*argv, 32898) : 0;
+        disk[--file_index] = *++argv ? open(*argv, 0) : 0;
     LOGI2("emulator_init: files opened, disk[0]=%d disk[1]=%d disk[2]=%d", disk[0], disk[1], disk[2]);
+    // Check file sizes
+    if (disk[2] > 0) {
+        off_t bios_size = lseek(disk[2], 0, SEEK_END);
+        lseek(disk[2], 0, SEEK_SET);
+        LOGI2("emulator_init: bios file size = %ld", bios_size);
+    }
     
     // Set CX:AX equal to the hard disk image size, if present
     CAST(unsigned)regs16[REG_AX] = *disk ? lseek(*disk, 0, 2) >> 9 : 0;
@@ -520,8 +530,21 @@ void emulator_init(int argc, char **argv) {
     // First 256 bytes (IVT template + register area) -> F000:0000
     read(disk[2], regs8, 0x100);
     // Rest 64KB-256 -> F000:0100
-    read(disk[2], regs8 + 0x100, 0xFF00);
-    LOGI2("emulator_init: BIOS loaded");
+    int r1 = read(disk[2], regs8, 0x100);
+    int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
+    LOGI2("emulator_init: BIOS loaded, r1=%d r2=%d", r1, r2);
+    // Dump first 16 bytes at F000:0100
+    LOGI2("F000:0100 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+          regs8[0x100], regs8[0x101], regs8[0x102], regs8[0x103],
+          regs8[0x104], regs8[0x105], regs8[0x106], regs8[0x107],
+          regs8[0x108], regs8[0x109], regs8[0x10A], regs8[0x10B],
+          regs8[0x10C], regs8[0x10D], regs8[0x10E], regs8[0x10F]);
+    // Dump first 16 bytes at F000:0000 (should be IVT)
+    LOGI2("F000:0000 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+          regs8[0x000], regs8[0x001], regs8[0x002], regs8[0x003],
+          regs8[0x004], regs8[0x005], regs8[0x006], regs8[0x007],
+          regs8[0x008], regs8[0x009], regs8[0x00A], regs8[0x00B],
+          regs8[0x00C], regs8[0x00D], regs8[0x00E], regs8[0x00F]);
     
     // Copy IVT template from F000:0000 to 0000:0000 (first 1KB = 256 vectors * 4 bytes)
     // IVT is split: first 256 bytes at F000:0000, next 768 at F000:0100
@@ -704,12 +727,18 @@ void emulator_init(int argc, char **argv) {
     // Now set up registers AFTER loading tables
     regs16[REG_CS] = 0xF000;
     reg_ip = 0x100;
+    LOGI2(">>> emulator_init EXIT <<<");
+    f = fopen("/sdcard/8086tiny/native.log", "a");
+    if (f) { fprintf(f, "emulator_init EXIT\\n"); fclose(f); }
 }
 
 // Emulator step function (formerly main() loop)
 void emulator_step(int max_instructions) {
     static int step_call_count = 0;
     step_call_count++;
+    LOGI2(">>> emulator_step ENTRY #%d, max_instructions=%d <<<", step_call_count, max_instructions);
+    FILE *f = fopen("/sdcard/8086tiny/native.log", "a");
+    if (f) { fprintf(f, "emulator_step ENTRY #%d, CS:IP=%04X:%04X\\n", step_call_count, regs16[REG_CS], reg_ip); fclose(f); }
     if (step_call_count <= 3 || step_call_count % 500 == 0) {
         LOGI2("emulator_step: started, max_instructions=%d", max_instructions);
     }
@@ -725,10 +754,18 @@ void emulator_step(int max_instructions) {
             regs8[FLAG_TF] = 0;
             reg_ip = 0x100;
             lseek(disk[2], 0, SEEK_SET);
-            // First 256 bytes (IVT template) -> F000:0000
-            read(disk[2], regs8, 0x100);
-            // Rest 64KB-256 -> F000:0100
-            read(disk[2], regs8 + 0x100, 0xFF00);
+// First 256 bytes (IVT template) -> F000:0000
+    off_t pos1 = lseek(disk[2], 0, SEEK_CUR);
+    LOGI2("Before first read: file pos = %ld", pos1);
+    int r1 = read(disk[2], regs8, 0x100);
+    off_t pos2 = lseek(disk[2], 0, SEEK_CUR);
+    LOGI2("After first read: file pos = %ld, r1=%d", pos2, r1);
+    // Rest 64KB-256 -> F000:0100
+    off_t pos3 = lseek(disk[2], 0, SEEK_CUR);
+    LOGI2("Before second read: file pos = %ld", pos3);
+    int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
+    off_t pos4 = lseek(disk[2], 0, SEEK_CUR);
+    LOGI2("After second read: file pos = %ld, r2=%d", pos4, r2);
             // Copy IVT template from F000:0000 to 0000:0000
             for (int i = 0; i < 0x400; i++) {
                 mem[i] = regs8[i];
@@ -1235,6 +1272,7 @@ void emulator_step(int max_instructions) {
 
 JNIEXPORT void JNICALL
 Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jstring jcurdir, jstring jcmdline) {
+    LOGI2(">>> nativeInit8086 ENTRY <<<");
     LOGI2("nativeInit8086 called");
     g_jni_env = env;
     g_emulator_view = (*env)->NewGlobalRef(env, thiz);
@@ -1249,7 +1287,7 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
     
     // Parse cmdline into argc/argv
     int argc = 1;
-    char *argv[10];
+    char *argv[10] = {0};
     argv[0] = "8086tiny";
     
     if (cmdline && strlen(cmdline) > 0) {
@@ -1271,12 +1309,14 @@ Java_com_eight086tiny_MainActivity_nativeInit8086(JNIEnv* env, jobject thiz, jst
     
     if (curdir) (*env)->ReleaseStringUTFChars(env, jcurdir, curdir);
     if (cmdline) (*env)->ReleaseStringUTFChars(env, jcmdline, cmdline);
+    LOGI2(">>> nativeInit8086 EXIT <<<");
 }
 
 JNIEXPORT void JNICALL
 Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz) {
     static int step_count = 0;
     step_count++;
+    LOGI2(">>> nativeStepFrame8086 ENTRY #%d, text_fb=%dx%d <<<", step_count, text_fb_width, text_fb_height);
     if (step_count <= 5 || step_count % 100 == 0) {
         __android_log_print(ANDROID_LOG_INFO, "8086tiny", "=== nativeStepFrame8086 DIRECT ENTRY ===");
         LOGI2("nativeStepFrame8086: before step, reg_ip=0x%04X, regs16[CS]=0x%04X, initialized=%d, TABLE_I_MOD_SIZE[0]=%d", 
@@ -1292,7 +1332,7 @@ Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz
             LOGI2("nativeStepFrame8086: AUTO-INIT - emulator not initialized, calling emulator_init");
         }
         __android_log_print(ANDROID_LOG_INFO, "8086tiny", "AUTO-INIT: calling emulator_init");
-        chdir("/sdcard");
+        chdir("/sdcard/8086tiny");
         emulator_init(3, (char*[]){"8086tiny", "bios", "fd.img"});
         emulator_initialized = 1;
         LOGI2("nativeStepFrame8086: AUTO-INIT complete, initialized=%d", emulator_initialized);
@@ -1306,6 +1346,7 @@ Java_com_eight086tiny_MainActivity_nativeStepFrame8086(JNIEnv* env, jobject thiz
     if (step_count <= 5 || step_count % 100 == 0) {
         LOGI2("nativeStepFrame8086: after step, reg_ip=0x%04X, regs16[CS]=0x%04X, inst_counter=%d", reg_ip, regs16[REG_CS], inst_counter);
     }
+    LOGI2(">>> nativeStepFrame8086 EXIT #%d <<<", step_count);
     render_text_mode();
 }
 

@@ -15,6 +15,12 @@ import android.view.WindowManager;
 
 public class MainActivity extends Activity {
     static {
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+            fw.write("STATIC BLOCK START\n");
+            fw.close();
+        } catch (Exception e) {}
+        Log.i("8086tiny", ">>> STATIC BLOCK START <<<");
         Log.i("8086tiny", "Loading sdl-1.2 library");
         System.loadLibrary("sdl-1.2");
         Log.i("8086tiny", "Loading sdl_main library");
@@ -22,6 +28,12 @@ public class MainActivity extends Activity {
         Log.i("8086tiny", "Loading 8086tiny library");
         System.loadLibrary("8086tiny");
         Log.i("8086tiny", "Libraries loaded successfully");
+        Log.i("8086tiny", ">>> STATIC BLOCK END <<<");
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+            fw.write("STATIC BLOCK END\n");
+            fw.close();
+        } catch (Exception e) {}
     }
 
     public native void nativeInit8086(String curdir, String cmdline);
@@ -43,6 +55,11 @@ public class MainActivity extends Activity {
 @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+            fw.write("onCreate START\n");
+            fw.close();
+        } catch (Exception e) {}
         Log.i("8086tiny", "=== onCreate START ===");
         
         requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -68,10 +85,25 @@ public class MainActivity extends Activity {
         emulatorThread = new Thread(new Runnable() {
             @Override
             public void run() {
+                try {
+                    java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+                    fw.write("Emulator thread STARTED\n");
+                    fw.close();
+                } catch (Exception e) {}
                 Log.i("8086tiny", "=== Emulator thread STARTED (id=" + Thread.currentThread().getId() + ") ===");
                 try {
+                    try {
+                        java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+                        fw.write("About to call nativeInit8086\n");
+                        fw.close();
+                    } catch (Exception e) {}
                     Log.i("8086tiny", "=== About to call nativeInit8086 ===");
-                    nativeInit8086("/sdcard", "bios fd.img");
+                    nativeInit8086("/sdcard/8086tiny", "bios fd.img");
+                    try {
+                        java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
+                        fw.write("nativeInit8086 returned\n");
+                        fw.close();
+                    } catch (Exception e) {}
                     Log.i("8086tiny", "=== nativeInit8086 returned ===");
                 } catch (UnsatisfiedLinkError e) {
                     Log.e("8086tiny", "=== UnsatisfiedLinkError in nativeInit8086: " + e.getMessage() + " ===");

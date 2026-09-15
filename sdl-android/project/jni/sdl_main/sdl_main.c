@@ -41,7 +41,9 @@ static void ensure_SDL_main() {
 
 jint JNI_OnLoad(JavaVM* vm, void* reserved)
 {
+    __android_log_print(ANDROID_LOG_INFO, "libSDL", ">>> JNI_OnLoad START <<<");
     __android_log_print(ANDROID_LOG_INFO, "libSDL", "JNI_OnLoad called");
+    __android_log_print(ANDROID_LOG_INFO, "libSDL", ">>> JNI_OnLoad END <<<");
     return JNI_VERSION_1_6;
 }
 

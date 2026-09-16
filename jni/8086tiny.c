@@ -536,9 +536,8 @@ void emulator_init(int argc, char **argv) {
     // First 256 bytes (IVT template + register area) -> F000:0000
     read(disk[2], regs8, 0x100);
     // Rest 64KB-256 -> F000:0100
-    int r1 = read(disk[2], regs8, 0x100);
     int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
-    LOGI2("emulator_init: BIOS loaded, r1=%d r2=%d", r1, r2);
+    LOGI2("emulator_init: BIOS loaded, r2=%d", r2);
     // Dump first 16 bytes at F000:0100
     LOGI2("F000:0100 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
           regs8[0x100], regs8[0x101], regs8[0x102], regs8[0x103],
@@ -753,25 +752,17 @@ void emulator_step(int max_instructions) {
     for (; opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip, opcode_stream != mem && instructions_executed < max_instructions;)
     {
         // Handle reset request
-        if (reset_requested) {
+if (reset_requested) {
             reset_requested = 0;
             regs16 = (unsigned short *)(regs8 = mem + REGS_BASE);
             regs16[REG_CS] = 0xF000;
             regs8[FLAG_TF] = 0;
             reg_ip = 0x100;
             lseek(disk[2], 0, SEEK_SET);
-// First 256 bytes (IVT template) -> F000:0000
-    off_t pos1 = lseek(disk[2], 0, SEEK_CUR);
-    LOGI2("Before first read: file pos = %ld", pos1);
-    int r1 = read(disk[2], regs8, 0x100);
-    off_t pos2 = lseek(disk[2], 0, SEEK_CUR);
-    LOGI2("After first read: file pos = %ld, r1=%d", pos2, r1);
-    // Rest 64KB-256 -> F000:0100
-    off_t pos3 = lseek(disk[2], 0, SEEK_CUR);
-    LOGI2("Before second read: file pos = %ld", pos3);
-    int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
-    off_t pos4 = lseek(disk[2], 0, SEEK_CUR);
-    LOGI2("After second read: file pos = %ld, r2=%d", pos4, r2);
+            // First 256 bytes (IVT template) -> F000:0000
+            read(disk[2], regs8, 0x100);
+            // Rest 64KB-256 -> F000:0100
+            read(disk[2], regs8 + 0x100, 0xFF00);
             // Copy IVT template from F000:0000 to 0000:0000
             for (int i = 0; i < 0x400; i++) {
                 mem[i] = regs8[i];

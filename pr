@@ -1,0 +1,2 @@
+Int 10h is required to switch to text mode, perhaps multiple times to get the right mode. Can we check our code to see if this is the blocker for our app (NEVER CHANGES FROM BLACK SCREEN)
+

@@ -1,0 +1,6 @@
+Read AGENTS.MD & BUILD_KNOWLEDGE.MD for context
+Android 1.6 (Donut) port of 8086 Tiny for Sharp IS01 device.
+Current state: no video - just a black screen on startup.
+Emulator running, but seems BIOS is not switching to text video mode, so no items displayed
+Expected items to be displayed: FD.IMG (freedos floppy) should boot and display messages
+Check for issues, and use Docker to compile new apk then push to device

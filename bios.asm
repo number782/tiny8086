@@ -279,6 +279,16 @@ boot:	mov	ax, 0
 	mov	ax, 0x0700
 	rep	stosw
 
+; Explicitly set video mode to 80x25 text mode (INT 10h, AH=00h, AL=03h)
+; This ensures text mode is active before boot sector loads
+	mov	ah, 0x00
+	mov	al, 0x03
+	int	10h
+
+; Print "TEXT TEST" string to verify text mode works (INT 10h, AH=0Eh teletype)
+	mov	si, text_test_str
+	call	print_string
+
 ; Set up some I/O ports, between 0 and FFF. Most of them we set to 0xFF, to indicate no device present
 
 	mov	dx, 0x61
@@ -2884,6 +2894,24 @@ puts_decimal_al:
 	pop	ax
 	ret
 
+; Print a zero-terminated string at DS:SI using INT 10h/0Eh (teletype)
+; Used for BIOS test string output
+
+print_string:
+	push	ax
+	push	si
+  ps_loop:
+	lodsb
+	cmp	al, 0
+	je	ps_done
+	mov	ah, 0x0e
+	int	10h
+	jmp	ps_loop
+  ps_done:
+	pop	si
+	pop	ax
+	ret
+
 ; Keyboard adjust buffer head and tail. If either head or the tail are at the end of the buffer, reset them
 ; back to the start, since it is a circular buffer.
 
@@ -3780,6 +3808,9 @@ colour_table	db	30, 34, 32, 36, 31, 35, 33, 37
 
 low_ascii_conv	db	' ', 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, '><|!|$', 250, '|^v><--^v'
 
+; BIOS test string - printed during POST to verify text mode
+text_test_str	db	'TEXT TEST', 0x0D, 0x0A, 0
+
 ; Conversion from UNIX cursor keys/SDL keycodes to scancodes
 
 unix_cursor_xlt	db	0x48, 0x50, 0x4d, 0x4b
@@ -3849,3 +3880,6 @@ tm_wday		equ $+24
 tm_yday		equ $+28
 tm_dst		equ $+32
 tm_msec		equ $+36
+
+; Pad to 64KB (65536 bytes) for BIOS ROM
+	times 65536 - ($ - $$) db 0

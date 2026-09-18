@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     public native int[] nativeGetFramebuffer8086();
     public native void nativeGetScreenSize8086(int[] size);
     public native void nativeTestFont8086();
+    public native void nativeSurfaceResumed8086();
     
     private EmulatorView emulatorView;
     private volatile Thread emulatorThread = null;
@@ -98,7 +99,7 @@ public class MainActivity extends Activity {
                         fw.close();
                     } catch (Exception e) {}
                     Log.i("8086tiny", "=== About to call nativeInit8086 ===");
-                    nativeInit8086("/sdcard/8086tiny", "bios fd.img");
+                    nativeInit8086("/sdcard/8086tiny", "/sdcard/8086tiny/bios /sdcard/8086tiny/fd.img");
                     try {
                         java.io.FileWriter fw = new java.io.FileWriter("/sdcard/8086tiny/startup.log", true);
                         fw.write("nativeInit8086 returned\n");
@@ -118,18 +119,28 @@ public class MainActivity extends Activity {
                     e.printStackTrace();
                     return;
                 }
+                // Verify initialization succeeded by checking if CPU is initialized
+                boolean initSuccess = false;
+                try {
+                    int[] size = new int[2];
+                    nativeGetScreenSize8086(size);
+                    if (size[0] > 0 && size[1] > 0) {
+                        initSuccess = true;
+                    }
+                } catch (Exception e) {
+                    Log.e("8086tiny", "=== Init verification failed: " + e.getMessage() + " ===");
+                }
+                if (!initSuccess) {
+                    Log.e("8086tiny", "=== Initialization failed - nativeInit8086 did not properly initialize emulator ===");
+                    return;
+                }
                 int frameCount = 0;
                 while (running) {
                     nativeStepFrame8086();
-                    // Render the frame to the SurfaceView
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (emulatorView != null) {
-                                emulatorView.renderFrame();
-                            }
-                        }
-                    });
+                    // Render directly on emulator thread to avoid blocking UI thread
+                    if (emulatorView != null) {
+                        emulatorView.renderFrameOnEmulatorThread();
+                    }
                     frameCount++;
                     if (frameCount <= 3 || frameCount % 500 == 0) {
                         Log.i("8086tiny", "Emulator loop: frameCount=" + frameCount);
@@ -150,8 +161,10 @@ public class MainActivity extends Activity {
     
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        Log.i("8086tiny", "onKeyDown: keyCode=" + keyCode);
         // Allow MENU key to open options menu
         if (keyCode == KeyEvent.KEYCODE_MENU) {
+            Log.i("8086tiny", "onKeyDown: MENU key, passing to super");
             return super.onKeyDown(keyCode, event);
         }
         Log.i("8086tiny", "onKeyDown: keyCode=" + keyCode + ", unicode=" + event.getUnicodeChar());
@@ -186,6 +199,7 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        Log.i("8086tiny", "dispatchKeyEvent: keyCode=" + event.getKeyCode() + ", action=" + event.getAction());
         // Intercept all key events (including physical keyboard) before system handling
         int action = event.getAction();
         int keyCode = event.getKeyCode();
@@ -193,6 +207,7 @@ public class MainActivity extends Activity {
         
         // Allow MENU key to open options menu
         if (keyCode == KeyEvent.KEYCODE_MENU) {
+            Log.i("8086tiny", "dispatchKeyEvent: MENU key, passing to super");
             return super.dispatchKeyEvent(event);
         }
         
@@ -236,9 +251,16 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean onCreateOptionsMenu(android.view.Menu menu) {
+        Log.i("8086tiny", "onCreateOptionsMenu called - creating menu");
         menu.add(0, 1, 0, "Reset Emulation");
         menu.add(0, 2, 0, "Font Test");
         return true;
+    }
+
+    @Override
+    public boolean onPrepareOptionsMenu(android.view.Menu menu) {
+        Log.i("8086tiny", "onPrepareOptionsMenu called");
+        return super.onPrepareOptionsMenu(menu);
     }
 
     @Override
@@ -276,7 +298,7 @@ public class MainActivity extends Activity {
             this.holder = holder;
             frameBitmap = Bitmap.createBitmap(frameWidth, frameHeight, Bitmap.Config.ARGB_8888);
             frameBuffer = new int[frameWidth * frameHeight];
-            for (int i = 0; i < frameBuffer.length; i++) {
+for (int i = 0; i < frameBuffer.length; i++) {
                 frameBuffer[i] = 0xFF000000;
             }
             frameBitmap.setPixels(frameBuffer, 0, frameWidth, 0, 0, frameWidth, frameHeight);
@@ -288,6 +310,8 @@ public class MainActivity extends Activity {
                 holder.unlockCanvasAndPost(canvas);
                 Log.i("8086tiny", "Surface recreated and initial fill drawn");
             }
+            // Signal native side that surface has been recreated
+            nativeSurfaceResumed8086();
         }
         
         @Override
@@ -297,7 +321,7 @@ public class MainActivity extends Activity {
             frameBuffer = new int[frameWidth * frameHeight];
             
             // Fill with black initially - the emulator will update with real content
-            for (int i = 0; i < frameBuffer.length; i++) {
+for (int i = 0; i < frameBuffer.length; i++) {
                 frameBuffer[i] = 0xFF000000;
             }
             frameBitmap.setPixels(frameBuffer, 0, frameWidth, 0, 0, frameWidth, frameHeight);
@@ -316,8 +340,8 @@ public class MainActivity extends Activity {
             Log.i("8086tiny", "Surface destroyed");
         }
         
-        public void renderFrame() {
-            if (frameBitmap == null) {
+        public void renderFrameOnEmulatorThread() {
+            if (frameBitmap == null || frameBuffer == null) {
                 return;
             }
             int[] fb = nativeGetFramebuffer8086();
@@ -361,6 +385,11 @@ public class MainActivity extends Activity {
                     Log.i("8086tiny", "renderFrame: fb length mismatch, got " + fb.length + " expected " + frameBuffer.length);
                 }
             }
+        }
+        
+        // Kept for compatibility (e.g., surfaceCreated)
+        public void renderFrame() {
+            renderFrameOnEmulatorThread();
         }
     }
 }

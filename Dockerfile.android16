@@ -16,13 +16,15 @@ RUN sed -i 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' /etc/a
     git \
     build-essential \
     lib32stdc++6 \
-    lib32z1 \
+    lib32z1 \ 
     lib32ncurses5 \
     lib32bz2-1.0 \
     lib32gcc1 \
     openjdk-6-jdk \
     unzip \
     zip \
+    bcc \
+    bin86 \
     ant \
     expect \
     && rm -rf /var/lib/apt/lists/*

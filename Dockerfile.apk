@@ -1,0 +1,97 @@
+# Dockerfile for building 8086tiny APK
+# Uses a prebuilt Android SDK/NDK image approach
+
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install 32-bit dependencies and build tools
+RUN dpkg --add-architecture i386 && \
+    apt-get update && apt-get install -y \
+    wget \
+    curl \
+    git \
+    build-essential \
+    libstdc++6:i386 \
+    libz1:i386 \
+    libncurses5:i386 \
+    libbz2-1.0:i386 \
+    gcc-multilib \
+    g++-multilib \
+    openjdk-8-jdk \
+    unzip \
+    zip \
+    bcc \
+    bin86 \
+    ant \
+    expect \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Java 8 as default
+ENV JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+ENV PATH=${JAVA_HOME}/bin:${PATH}
+
+# Download and install Android NDK r5c
+ENV NDK_VERSION=r5c
+ENV NDK_URL=https://dl.google.com/android/ndk/android-ndk-${NDK_VERSION}-linux-x86.tar.bz2
+
+RUN mkdir -p /opt/android && \
+    cd /opt/android && \
+    wget -q ${NDK_URL} && \
+    tar -xjf android-ndk-${NDK_VERSION}-linux-x86.tar.bz2 && \
+    rm android-ndk-${NDK_VERSION}-linux-x86.tar.bz2
+
+ENV NDK_ROOT=/opt/android/android-ndk-${NDK_VERSION}
+ENV PATH=${NDK_ROOT}:${PATH}
+
+# Create standalone toolchain for Android 1.6 (API 4) ARM
+RUN ${NDK_ROOT}/build/tools/make-standalone-toolchain.sh \
+    --platform=android-4 \
+    --toolchain=arm-linux-androideabi-4.4.3 \
+    --install-dir=/opt/android-toolchain
+
+ENV ANDROID_TOOLCHAIN=/opt/android-toolchain
+ENV PATH=${ANDROID_TOOLCHAIN}/bin:${PATH}
+ENV CC=arm-linux-androideabi-gcc
+ENV CXX=arm-linux-androideabi-g++
+ENV AR=arm-linux-androideabi-ar
+ENV STRIP=arm-linux-androideabi-strip
+ENV SYSROOT=${ANDROID_TOOLCHAIN}/sysroot
+
+# Install Android SDK (use older tools that work with Java 8)
+ENV SDK_DIR=/opt/android-sdk/android-sdk-linux
+RUN mkdir -p ${SDK_DIR} && \
+    cd /tmp && \
+    wget -q http://dl.google.com/android/android-sdk_r24.4.1-linux.tgz && \
+    tar -xzf android-sdk_r24.4.1-linux.tgz -C /opt/android-sdk && \
+    rm android-sdk_r24.4.1-linux.tgz
+
+ENV ANDROID_HOME=${SDK_DIR}
+ENV PATH=${SDK_DIR}/tools:${SDK_DIR}/platform-tools:${PATH}
+
+# Install SDK platform tools and build tools
+RUN echo y | ${SDK_DIR}/tools/android update sdk --no-ui --filter platform-tools,android-19,extra-android-support 2>&1 | tail -20
+
+# Install build tools 19.1.0 manually
+RUN cd /tmp && \
+    wget -q https://dl.google.com/android/repository/build-tools_r19.1-linux.zip -O build-tools.zip && \
+    unzip -q build-tools.zip -d ${SDK_DIR}/build-tools/ && \
+    rm build-tools.zip && \
+    mv ${SDK_DIR}/build-tools/android-4.4.2 ${SDK_DIR}/build-tools/19.1.0 && \
+    echo "Pkg.Revision=19.1.0" > ${SDK_DIR}/build-tools/19.1.0/source.properties
+
+# Set up work directory
+WORKDIR /src
+
+# Copy source
+COPY . /src/
+
+# Build native library
+RUN /opt/android/android-ndk-r5c/ndk-build -C /src/jni
+
+# Build APK with ant
+RUN cd /src && ant debug
+
+# Output APK location
+CMD ["ls", "-la", "/src/bin/"]

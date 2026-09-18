@@ -1,0 +1,11 @@
+CC = gcc
+CFLAGS = -O3 -fsigned-char -std=c99 -DNO_GRAPHICS
+LDFLAGS = 
+
+all: 8086tiny
+
+8086tiny: 8086tiny.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+clean:
+	rm -f 8086tiny

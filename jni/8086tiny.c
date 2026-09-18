@@ -9,6 +9,8 @@
 #include <time.h>
 #include <sys/timeb.h>
 #include <memory.h>
+#include <jni.h>
+#include <stdint.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -19,6 +21,9 @@
 #include "SDL.h"
 #endif
 
+#define BIOS_PATH "/sdcard/tiny8086/bios"
+#define FD_PATH "/sdcard/tiny8086/fd.img"
+
 // Logging - must be defined early for use in pc_interrupt and emulator_step
 #ifdef ANDROID
 #include <android/log.h>
@@ -28,11 +33,14 @@
 #define LOGI2(...) do { fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif
 
+
 // Emulator system constants
 #define IO_PORT_COUNT 0x10000
 #define RAM_SIZE 0x10FFF0
 #define REGS_BASE 0xF0000
 #define VIDEO_RAM_SIZE 0x10000
+#define FB_WIDTH 320
+#define FB_HEIGHT 200
 
 // Graphics/timer/keyboard update delays (explained later)
 #ifndef GRAPHICS_UPDATE_DELAY
@@ -278,8 +286,21 @@ char pc_interrupt(unsigned char interrupt_num)
     mem[REGS_BASE + 2 * REG_CS + 1] = ivt_cs >> 8;
     reg_ip = ivt_ip;
     LOGI2("INT %02X: IVT[%02X] IP=%04X CS=%04X -> CS:IP=%04X:%04X", interrupt_num, interrupt_num, ivt_ip, ivt_cs, regs16[REG_CS], reg_ip);
-    if (regs16[REG_CS] == 0)
-        LOGI2("WARNING: INT %02X set CS=0! IVT raw bytes: [0x%02X,0x%02X,0x%02X,0x%02X]", interrupt_num, mem[4*interrupt_num], mem[4*interrupt_num+1], mem[4*interrupt_num+2], mem[4*interrupt_num+3]);
+static unsigned int loop02ca_count = 0;
+
+if (regs16[REG_CS] == 0xF000 && reg_ip == 0x02CA) {
+    loop02ca_count++;
+
+    if ((loop02ca_count & 0x3FF) == 0) {
+        LOGI2(
+            "LOOP02CA count=%u DX=%04X IF=%d op_result=%d",
+            loop02ca_count,
+            regs16[REG_DX],
+            regs8[FLAG_IF],
+            op_result
+        );
+    }
+}
 
     return regs8[FLAG_TF] = regs8[FLAG_IF] = 0;
 }
@@ -533,9 +554,7 @@ void emulator_init(int argc, char **argv) {
     
     // Load BIOS image into F000:0000 (first 256 bytes) and F000:0100 (rest), and set IP to 0100
     LOGI2("emulator_init: reading BIOS into memory");
-    // First 256 bytes (IVT template + register area) -> F000:0000
-    read(disk[2], regs8, 0x100);
-    // Rest 64KB-256 -> F000:0100
+    reg_ip = 0x100;
     int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
     LOGI2("emulator_init: BIOS loaded, r2=%d", r2);
     // Dump first 16 bytes at F000:0100
@@ -590,92 +609,6 @@ void emulator_init(int argc, char **argv) {
           bios_table_lookup[12][0], bios_table_lookup[14][0], bios_table_lookup[13][0]);
     LOGI2("  TABLE_BASE_INST_SIZE[01]=%d, TABLE_I_MOD_SIZE[01]=%d",
           bios_table_lookup[12][1], bios_table_lookup[14][1]);
-    
-    // Patch corrupted BIOS tables with correct values
-    // TABLE_I_MOD_SIZE (14): 1 for modrm opcodes, 0 otherwise
-    // TABLE_BASE_INST_SIZE (12): base instruction length
-    // TABLE_I_W_SIZE (13): W bit size adjustment
-    for (int i = 0; i < 256; i++) {
-        unsigned char op = i;
-        unsigned char op0 = op & 0xF8;
-        unsigned char op1 = op & 0xFE;
-        
-        // Most opcodes in 0x00-0xFF use modrm (i_mod_size=1), except:
-        // 0x06,0x0E,0x16,0x1E (PUSH ES/CS/SS/DS) - no modrm
-        // 0x07,0x0F,0x17,0x1F (POP ES/CS/SS/DS) - no modrm
-        // 0x27 (DAA), 0x2F (DAS), 0x37 (AAA), 0x3F (AAS) - no modrm
-        // 0x40-0x47 (INC reg), 0x48-0x4F (DEC reg) - no modrm
-        // 0x50-0x57 (PUSH reg), 0x58-0x5F (POP reg) - no modrm
-        // 0x60 (PUSHA), 0x61 (POPA) - no modrm
-        // 0x90 (NOP), 0x91-0x97 (XCHG AX,reg) - no modrm
-        // 0x98 (CBW), 0x99 (CWD) - no modrm
-        // 0x9A (CALL far), 0x9B (WAIT) - no modrm
-        // 0x9C (PUSHF), 0x9D (POPF) - no modrm
-        // 0x9E (SAHF), 0x9F (LAHF) - no modrm
-        // 0xA0-0xA3 (MOV AL/AX,[addr]) - no modrm
-        // 0xA4-0xA5 (MOVS), 0xA6-0xA7 (CMPS) - no modrm
-        // 0xA8-0xA9 (TEST AL/AX,imm) - no modrm
-        // 0xAA-0xAF (STOS/LODS/SCAS) - no modrm
-        // 0xB0-0xBF (MOV reg,imm) - no modrm
-        // 0xC0-0xC1 (shift/rotate) - has modrm
-        // 0xC2 (RET imm), 0xC3 (RET) - no modrm
-        // 0xC4 (LES), 0xC5 (LDS) - has modrm
-        // 0xC6-0xC7 (MOV r/m,imm) - has modrm
-        // 0xC8 (ENTER), 0xC9 (LEAVE) - no modrm
-        // 0xCA (RETF imm), 0xCB (RETF) - no modrm
-        // 0xCC (INT 3), 0xCD (INT imm), 0xCE (INTO), 0xCF (IRET) - no modrm
-        // 0xD0-0xD3 (shift/rotate) - has modrm
-        // 0xD4 (AAM), 0xD5 (AAD) - no modrm
-        // 0xD6 (SALC), 0xD7 (XLAT) - no modrm
-        // 0xD8-0xDF (FPU) - has modrm mostly
-        // 0xE0-0xE3 (LOOP/JCXZ) - no modrm
-        // 0xE4-0xE5 (IN AL/AX,imm8) - no modrm
-        // 0xE6-0xE7 (OUT imm8,AL/AX) - no modrm
-        // 0xE8 (CALL near), 0xE9 (JMP near) - no modrm
-        // 0xEA (JMP far), 0xEB (JMP short) - no modrm
-        // 0xEC-0xEF (IN/OUT DX,AL/AX) - no modrm
-        // 0xF0 (LOCK), 0xF2 (REPNE), 0xF3 (REP) - prefixes
-        // 0xF4 (HLT), 0xF5 (CMC) - no modrm
-        // 0xF6-0xF7 (TEST/NOT/NEG/MUL/IMUL/DIV/IDIV) - has modrm
-        // 0xF8 (CLC), 0xF9 (STC), 0xFA (CLI), 0xFB (STI) - no modrm
-        // 0xFC (CLD), 0xFD (STD) - no modrm
-        // 0xFE-0xFF (INC/DEC/PUSH/CALL/JMP/PUSH) - has modrm
-        
-        int has_modrm = 0;
-        int base_size = 1;
-        int w_size = 0;
-        
-        if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||  // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m,reg
-            (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||  // ADC/SBB reg,r/m
-            (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||  // AND/SUB reg,r/m
-            (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||  // XOR/CMP reg,r/m
-            op == 0x62 || op == 0x63 ||  // BOUND, ARPL
-            (op >= 0x68 && op <= 0x6B) ||  // PUSH/IMUL imm
-            op == 0x6C || op == 0x6D || op == 0x6E || op == 0x6F ||  // INS/OUTS
-            (op >= 0x80 && op <= 0x83) ||  // ADD/OR/ADC/SBB/AND/SUB/XOR/CMP r/m,imm
-            (op >= 0x84 && op <= 0x87) ||  // TEST/XCHG reg,r/m
-            (op >= 0x88 && op <= 0x8F) ||  // MOV reg,r/m / MOV r/m,reg / POP r/m
-            (op >= 0xC0 && op <= 0xC1) ||  // Shift/rotate r/m,imm
-            op == 0xC4 || op == 0xC5 ||  // LES/LDS
-            (op >= 0xC6 && op <= 0xC7) ||  // MOV r/m,imm
-            (op >= 0xD0 && op <= 0xD3) ||  // Shift/rotate r/m,1/CL
-            (op >= 0xD8 && op <= 0xDF) ||  // FPU
-            (op >= 0xF6 && op <= 0xF7) ||  // TEST/NOT/NEG/MUL/IMUL/DIV/IDIV
-            (op >= 0xFE && op <= 0xFF)) {  // INC/DEC/PUSH/CALL/JMP/PUSH
-            has_modrm = 1;
-            base_size = 2;
-        }
-        
-        if ((op & 1) && (op0 == 0x00 || op0 == 0x08 || op0 == 0x10 || op0 == 0x18 || 
-                         op0 == 0x20 || op0 == 0x28 || op0 == 0x30 || op0 == 0x38 ||
-                         op0 == 0x80 || op0 == 0x88 || op0 == 0xC6 || op0 == 0xF6)) {
-            w_size = 1;
-        }
-        
-        bios_table_lookup[14][i] = has_modrm ? 1 : 0;
-        bios_table_lookup[12][i] = base_size;
-        bios_table_lookup[13][i] = w_size;
-    }
     
     // Fix TABLE_STD_FLAGS (10): default to FLAGS_UPDATE_SZP for arithmetic/logic
     for (int i = 0; i < 256; i++) {
@@ -754,15 +687,12 @@ void emulator_step(int max_instructions) {
         // Handle reset request
 if (reset_requested) {
             reset_requested = 0;
-            regs16 = (unsigned short *)(regs8 = mem + REGS_BASE);
+	    regs16 = (unsigned short *)(regs8 = mem + REGS_BASE);
             regs16[REG_CS] = 0xF000;
             regs8[FLAG_TF] = 0;
             reg_ip = 0x100;
             lseek(disk[2], 0, SEEK_SET);
-            // First 256 bytes (IVT template) -> F000:0000
-            read(disk[2], regs8, 0x100);
-            // Rest 64KB-256 -> F000:0100
-            read(disk[2], regs8 + 0x100, 0xFF00);
+            int r2 = read(disk[2], regs8 + 0x100, 0xFF00);
             // Copy IVT template from F000:0000 to 0000:0000
             for (int i = 0; i < 0x400; i++) {
                 mem[i] = regs8[i];
@@ -777,58 +707,6 @@ if (reset_requested) {
             for (int i = 0; i < 20; i++)
                 for (int j = 0; j < 256; j++)
                     bios_table_lookup[i][j] = regs8[regs16[0x81 + i] + j];
-            // Patch corrupted BIOS tables (same as in emulator_init)
-            for (int i = 0; i < 256; i++) {
-                unsigned char op = i;
-                unsigned char op0 = op & 0xF8;
-                int has_modrm = 0, base_size = 1, w_size = 0;
-                if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||
-                    (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||
-                    (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||
-                    (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||
-                    op == 0x62 || op == 0x63 || (op >= 0x68 && op <= 0x6B) ||
-                    (op >= 0x6C && op <= 0x6F) || (op >= 0x80 && op <= 0x8F) ||
-                    (op >= 0xC0 && op <= 0xC1) || op == 0xC4 || op == 0xC5 ||
-                    (op >= 0xC6 && op <= 0xC7) || (op >= 0xD0 && op <= 0xD3) ||
-                    (op >= 0xD8 && op <= 0xDF) || (op >= 0xF6 && op <= 0xFF)) {
-                    has_modrm = 1; base_size = 2;
-                }
-                if ((op & 1) && (op0 == 0x00 || op0 == 0x08 || op0 == 0x10 || op0 == 0x18 ||
-                                 op0 == 0x20 || op0 == 0x28 || op0 == 0x30 || op0 == 0x38 ||
-                                 op0 == 0x80 || op0 == 0x88 || op0 == 0xC6 || op0 == 0xF6)) {
-                    w_size = 1;
-                }
-                bios_table_lookup[14][i] = has_modrm ? 1 : 0;
-                bios_table_lookup[12][i] = base_size;
-                bios_table_lookup[13][i] = w_size;
-            }
-            for (int i = 0; i < 256; i++) {
-                unsigned char op = i;
-                int flags = 0;
-                if ((op >= 0x00 && op <= 0x05) || (op >= 0x08 && op <= 0x0D) ||
-                    (op >= 0x10 && op <= 0x15) || (op >= 0x18 && op <= 0x1D) ||
-                    (op >= 0x20 && op <= 0x25) || (op >= 0x28 && op <= 0x2D) ||
-                    (op >= 0x30 && op <= 0x35) || (op >= 0x38 && op <= 0x3D) ||
-                    (op >= 0x80 && op <= 0x83) || (op >= 0xF6 && op <= 0xF7)) {
-                    flags = 1 | 2;
-                } else if ((op >= 0x84 && op <= 0x87) || (op >= 0xA8 && op <= 0xA9)) {
-                    flags = 1;
-                }
-                bios_table_lookup[10][i] = flags;
-            }
-            for (int i = 0; i < 256; i++) {
-                bios_table_lookup[15][i] = bios_table_lookup[16][i] = bios_table_lookup[17][i] = bios_table_lookup[18][i] = 0;
-            }
-            bios_table_lookup[15][0x72] = bios_table_lookup[15][0x73] = bios_table_lookup[16][0x72] = bios_table_lookup[16][0x73] = FLAG_CF;
-            bios_table_lookup[15][0x74] = bios_table_lookup[15][0x75] = bios_table_lookup[16][0x74] = bios_table_lookup[16][0x75] = FLAG_ZF;
-            bios_table_lookup[15][0x76] = bios_table_lookup[15][0x77] = bios_table_lookup[17][0x76] = bios_table_lookup[17][0x77] = FLAG_CF;
-            bios_table_lookup[16][0x76] = bios_table_lookup[16][0x77] = bios_table_lookup[18][0x76] = bios_table_lookup[18][0x77] = FLAG_ZF;
-            bios_table_lookup[15][0x78] = bios_table_lookup[15][0x79] = bios_table_lookup[16][0x78] = bios_table_lookup[16][0x79] = FLAG_SF;
-            bios_table_lookup[15][0x7A] = bios_table_lookup[15][0x7B] = bios_table_lookup[16][0x7A] = bios_table_lookup[16][0x7B] = FLAG_PF;
-            bios_table_lookup[15][0x7C] = bios_table_lookup[15][0x7D] = bios_table_lookup[17][0x7C] = bios_table_lookup[17][0x7D] = FLAG_SF;
-            bios_table_lookup[16][0x7C] = bios_table_lookup[16][0x7D] = bios_table_lookup[18][0x7C] = bios_table_lookup[18][0x7D] = FLAG_OF;
-            bios_table_lookup[15][0x7E] = bios_table_lookup[15][0x7F] = bios_table_lookup[17][0x7E] = bios_table_lookup[17][0x7F] = FLAG_ZF;
-            bios_table_lookup[16][0x7E] = bios_table_lookup[16][0x7F] = bios_table_lookup[18][0x7E] = bios_table_lookup[18][0x7F] = FLAG_SF;
             mem[0x4A6] = 0;
             io_ports[0x64] = 0;
             inst_counter = 0;
@@ -840,9 +718,20 @@ if (reset_requested) {
             continue;
         }
         
-        set_opcode(*opcode_stream);
-        
-// Debug: log instruction at stuck address (rate limited)
+set_opcode(*opcode_stream);
+        if (regs16[REG_CS] == 0xF000 && reg_ip >= 0x02C0 && reg_ip <= 0x02D5) {
+            LOGI2(
+                "BIOS IO probe: IP=%04X DX=%04X AL=%02X "
+                "port40=%02X port3DA=%02X port3D4=%02X port3D5=%02X",
+                reg_ip,
+                regs16[REG_DX],
+                regs8[REG_AL],
+                io_ports[0x40],
+                io_ports[0x3DA],
+                io_ports[0x3D4],
+                io_ports[0x3D5]
+            );
+        }// Debug: log instruction at stuck address (rate limited)
          static int stuck_count = 0;
          if (regs16[REG_CS] == 0x17B8 && reg_ip == 0x1798) {
              if (++stuck_count % 10000 == 1) {
@@ -1401,7 +1290,53 @@ Java_com_eight086tiny_MainActivity_nativeTestFont8086(JNIEnv* env, jobject thiz)
     render_text_mode();
 }
 
+JNIEXPORT void JNICALL
+Java_com_eight086tiny_MainActivity_nativeSurfaceResumed8086(JNIEnv* env, jobject thiz) {
+	LOGI2("nativeSurfaceResumed8086 called");
+	render_text_mode();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_eight086tiny_MainActivity_initEmulator(JNIEnv* env, jobject obj) {
+    FILE* bios_file = fopen(BIOS_PATH, "rb");
+    if (!bios_file) {
+        LOGI2("Failed to open BIOS image at %s", BIOS_PATH);
+        return JNI_FALSE;
+    }
+    
+    FILE* fd_file = fopen(FD_PATH, "rb");
+    if (!fd_file) {
+        LOGI2("Failed to open floppy image at %s", FD_PATH);
+        fclose(bios_file);
+        return JNI_FALSE;
+    }
+
+    LOGI2("Successfully loaded BIOS and floppy image.");
+    fclose(bios_file);
+    fclose(fd_file);
+    return JNI_TRUE;
+}
+
 #endif
+
+JNIEXPORT void JNICALL
+Java_com_eight086tiny_MainActivity_renderFrame(JNIEnv* env, jobject obj, jintArray pixelArray) {
+    jint *pixels = (*env)->GetIntArrayElements(env, pixelArray, NULL);
+    if (!pixels) return;
+
+    // Example for VGA Mode 13h (320x200 @ segment 0xA0000)
+    uint8_t *vga_mem = &mem[0xA0000];
+
+    for (int i = 0; i < FB_WIDTH * FB_HEIGHT; i++) {
+        uint8_t color_index = vga_mem[i];
+        
+        // Convert color index to 32-bit ARGB (0xAARRGGBB)
+        // (Simplified gray scale or lookup palette)
+        pixels[i] = 0xFF000000 | (color_index << 16) | (color_index << 8) | color_index;
+    }
+
+    (*env)->ReleaseIntArrayElements(env, pixelArray, pixels, 0);
+}
 
 // Emulator entry point (desktop builds only)
 #ifndef NO_MAIN
